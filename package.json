@@ -1,0 +1,13 @@
+{
+  "name": "vllm-proxy-suite",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check apps/gateway/server.js && node --check apps/vllm-cc-proxy/server.js && node --check apps/vllm-openai-proxy/server.js && node --check vllm-proxy-suite.js && node scripts/validate-package.js"
+  }
+}

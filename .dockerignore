@@ -1,0 +1,14 @@
+.git
+.gitignore
+.worktrees
+node_modules
+coverage
+*.log
+*.zip
+.env
+Dockerfile*
+docker-compose*.yaml
+test
+docs
+
+tmp

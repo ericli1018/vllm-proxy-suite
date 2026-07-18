@@ -1,0 +1,102 @@
+volumes:
+  vllm-proxy-suite:
+
+services:
+  vllm-proxy-suite:
+    image: node:22-alpine
+    container_name: vllm-proxy-suite
+    init: true
+    depends_on:
+      vllm:
+        condition: service_healthy
+    ports:
+      - "3456:3456"
+    restart: unless-stopped
+    stop_grace_period: 5m
+    environment:
+      NODE_OPTIONS: "--max-old-space-size=${VLLM_PROXY_SUITE_HEAP_MB:-4096}"
+      PROXY_HOST: "0.0.0.0"
+      PROXY_PORT: "3456"
+
+      VLLM_PROXY_SUITE_REPOSITORY: "https://github.com/ericli1018/vllm-proxy-suite.git"
+      VLLM_PROXY_SUITE_REF: "${VLLM_PROXY_SUITE_REF:-main}"
+
+      VLLM_BASE_URL: "http://vllm:8001"
+      VLLM_API_KEY: "${VLLM_API_KEY:-vllm}"
+      VLLM_CC_PROXY_API_KEY: "${VLLM_CC_PROXY_API_KEY:-replace-with-a-long-random-key}"
+      VLLM_OPENAI_PROXY_API_KEY: "${VLLM_OPENAI_PROXY_API_KEY:-replace-with-another-long-random-key}"
+
+      DEFAULT_ENABLE_THINKING: "true"
+      DEFAULT_MAX_TOKENS: "8192"
+
+      MAX_RECOVERY_ATTEMPTS: "1"
+      RECOVERY_TEMPERATURE_MAX: "0.45"
+      RECOVERY_MAX_TOKENS: "4096"
+      RECOVERY_NETWORK_TEMPERATURE_MAX: "0.30"
+      RECOVERY_NETWORK_MAX_TOKENS: "1024"
+      RECOVERY_NETWORK_LOOKUP_TOOL_NAMES: "${RECOVERY_NETWORK_LOOKUP_TOOL_NAMES:-}"
+      RECOVERY_NETWORK_DOWNLOAD_TOOL_NAMES: "${RECOVERY_NETWORK_DOWNLOAD_TOOL_NAMES:-}"
+      RECOVERY_NETWORK_HYBRID_TOOL_NAMES: "${RECOVERY_NETWORK_HYBRID_TOOL_NAMES:-}"
+
+      CLAUDE_CODE_TOOL_RECOVERY_ENABLED: "${CLAUDE_CODE_TOOL_RECOVERY_ENABLED:-true}"
+      CLAUDE_CODE_EDIT_RECOVERY_ENABLED: "${CLAUDE_CODE_EDIT_RECOVERY_ENABLED:-true}"
+      CLAUDE_CODE_WRITE_RECOVERY_ENABLED: "${CLAUDE_CODE_WRITE_RECOVERY_ENABLED:-true}"
+      CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED: "${CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED:-true}"
+      CLAUDE_CODE_BASH_INVALIDATES_READS: "${CLAUDE_CODE_BASH_INVALIDATES_READS:-true}"
+
+      HEARTBEAT_INTERVAL_MS: "10000"
+      UPSTREAM_IDLE_TIMEOUT_MS: "180000"
+      SEMANTIC_STALL_TIMEOUT_MS: "300000"
+      TOTAL_GENERATION_TIMEOUT_MS: "1800000"
+      RECOVERY_TIMEOUT_MS: "900000"
+      SHUTDOWN_GRACE_MS: "300000"
+
+      MAX_ACTIVE_REQUESTS: "256"
+      MAX_REQUEST_BODY_BYTES: "8388608"
+      MAX_RESPONSE_BUFFER_BYTES: "33554432"
+      MAX_TOTAL_BUFFERED_BYTES: "1073741824"
+      MAX_THINKING_BYTES: "4194304"
+      MAX_TOOL_ARGUMENT_BYTES: "8388608"
+      MAX_CONTENT_BLOCKS: "256"
+      MAX_TOOL_CALLS: "128"
+
+      LOOP_MIN_PATTERN_SIZE: "24"
+      LOOP_MAX_PATTERN_SIZE: "2048"
+      LOOP_MIN_COUNT: "2"
+      LOOP_REASONING_CHAR_LIMIT: "24000"
+      LOOP_SCAN_INTERVAL_CHARS: "64"
+      LOG_LEVEL: "info"
+    volumes:
+      - vllm-proxy-suite:/app
+    command: >
+      sh -ec "
+        apk add --no-cache git su-exec &&
+        if [ ! -d /app/.git ]; then
+          find /app -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&
+          git clone --branch \"$${VLLM_PROXY_SUITE_REF}\" \"$${VLLM_PROXY_SUITE_REPOSITORY}\" /app;
+        else
+          git -C /app remote set-url origin \"$${VLLM_PROXY_SUITE_REPOSITORY}\";
+          git -C /app pull --ff-only origin \"$${VLLM_PROXY_SUITE_REF}\";
+        fi &&
+        chown -R node:node /app &&
+        exec su-exec node node /app/vllm-proxy-suite.js
+      "
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3456/health/ready')
+          .then((response)=>process.exit(response.ok?0:1))
+          .catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - vllm-test-network

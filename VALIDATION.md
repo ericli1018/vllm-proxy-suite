@@ -1,29 +1,19 @@
-# Validation Report
+# VLLM-PROXY-SUITE v0.4.0 Validation
 
-## Environment
+Validated in the artifact environment:
 
-- Date: 2026-07-18
-- Node.js: 22.16.0
-- Docker CLI: not installed in the execution environment
-- Architecture: single-process JavaScript Gateway
+- `npm test`: 78 tests passed, 0 failed.
+- `npm run check`: passed.
+- All production JavaScript files passed `node --check`.
+- Compose YAML parsed successfully and defines exactly one `vllm-proxy-suite` service on `3456:3456`.
+- Compose startup shell passed `sh -n`.
+- Logging tests verify level filtering, request context, periodic throughput, and payload exclusion.
+- Debug progress includes average and recent upstream bytes/sec, stream frame count, semantic progress, buffer size, and last activity ages.
+- Info logging correlates generated tool calls with tool results received on later requests without logging payload text.
+- The clean ZIP extraction was tested separately with the full test suite and package validator.
 
-## Verified
+Not validated in this environment:
 
-- `apps/gateway/server.js` is the only deployed HTTP listener and routes native API paths directly to in-process Anthropic/OpenAI runtimes.
-- `/v1/messages` and `/v1/messages/count_tokens` route to Anthropic; the remaining `/v1/*` routes to OpenAI; unknown paths return `404`.
-- Anthropic and OpenAI use separate external API keys while forwarding directly to the configured vLLM base URL.
-- Guarded Anthropic Messages and OpenAI Chat Completions requests both execute successfully through the single Gateway in integration tests.
-- Suite health, protocol health, combined metrics, protocol metrics and graceful drain are observable from port `3456`.
-- Full `node:test` suite passes: 74 tests, 0 failures.
-- `npm run check` passes and package validation reports the `single-process-javascript-gateway` architecture.
-- Every JavaScript source file under `apps/`, `packages/`, and `scripts/`, plus `vllm-proxy-suite.js`, passes `node --check`.
-- Compose YAML parses successfully and defines exactly one service named `vllm-proxy-suite`.
-- Compose publishes only `3456`, contains no Nginx service, and contains no internal protocol listener ports.
-- Compose startup shell passes `sh -n` after Docker Compose dollar escaping is resolved.
-- Compose repository source is exactly `https://github.com/ericli1018/vllm-proxy-suite.git`.
-- The real `vllm-proxy-suite.js` entry point starts, reports live/ready, exposes combined metrics, and drains cleanly on `SIGTERM`.
-- Claude Code Tool Recovery and OpenAI network-tool Recovery regression tests remain passing.
-
-## Not Executed Here
-
-A real Docker container build, `docker compose config`, live GitHub clone inside the container, and end-to-end integration with the target vLLM, Claude Code and OpenAI SDK were not executed because Docker is not installed in this environment.
+- Docker image/container execution.
+- Live Hermes → Gateway → vLLM integration.
+- Production load and long-duration throughput behavior.

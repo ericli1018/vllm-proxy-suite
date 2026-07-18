@@ -22,7 +22,11 @@ test('Compose synchronizes the requested GitHub repository into the named volume
   assert.match(compose, /^  vllm-proxy-suite:$/m);
   assert.match(compose, /vllm-proxy-suite:\/app/);
   assert.match(compose, /git clone/);
-  assert.match(compose, /git -C \/app pull --ff-only/);
+  assert.doesNotMatch(compose, /git config --global --add safe\.directory \/app/);
+  assert.match(compose, /git -c safe\.directory=\/app -C \/app fetch --force --prune origin/);
+  assert.match(compose, /git -c safe\.directory=\/app -C \/app reset --hard FETCH_HEAD/);
+  assert.match(compose, /git -c safe\.directory=\/app -C \/app clean -fdx/);
+  assert.doesNotMatch(compose, /git -C \/app pull/);
 });
 
 test('Compose exposes both protocol-specific API keys on the single service', async () => {

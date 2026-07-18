@@ -61,5 +61,10 @@ export function loadCommonConfig(env = process.env, defaults = {}) {
     loopReasoningCharLimit: parseInteger(env.LOOP_REASONING_CHAR_LIMIT, 24000, { min: 128 }),
     loopScanIntervalChars: parseInteger(env.LOOP_SCAN_INTERVAL_CHARS, 64, { min: 8 }),
     logLevel: env.LOG_LEVEL || defaults.logLevel || 'info',
+    logFormat: env.LOG_FORMAT || defaults.logFormat || 'json',
+    progressLogIntervalMs: parseInteger(env.PROGRESS_LOG_INTERVAL_MS, 10000, { min: 1000 }),
+    progressStallWarningMs: parseInteger(env.PROGRESS_STALL_WARNING_MS, 30000, { min: 1000 }),
+    logToolPayloads: parseBoolean(env.LOG_TOOL_PAYLOADS, false),
+    logToolPayloadMaxBytes: parseInteger(env.LOG_TOOL_PAYLOAD_MAX_BYTES, 1024, { min: 0 }),
   });
 }

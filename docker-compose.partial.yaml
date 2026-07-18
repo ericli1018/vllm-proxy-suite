@@ -65,7 +65,12 @@ services:
       LOOP_MIN_COUNT: "2"
       LOOP_REASONING_CHAR_LIMIT: "24000"
       LOOP_SCAN_INTERVAL_CHARS: "64"
-      LOG_LEVEL: "info"
+      LOG_LEVEL: "${VLLM_PROXY_LOG_LEVEL:-info}"
+      LOG_FORMAT: "${VLLM_PROXY_LOG_FORMAT:-text}"
+      PROGRESS_LOG_INTERVAL_MS: "${VLLM_PROXY_PROGRESS_LOG_INTERVAL_MS:-10000}"
+      PROGRESS_STALL_WARNING_MS: "${VLLM_PROXY_PROGRESS_STALL_WARNING_MS:-30000}"
+      LOG_TOOL_PAYLOADS: "${VLLM_PROXY_LOG_TOOL_PAYLOADS:-false}"
+      LOG_TOOL_PAYLOAD_MAX_BYTES: "${VLLM_PROXY_LOG_TOOL_PAYLOAD_MAX_BYTES:-1024}"
     volumes:
       - vllm-proxy-suite:/app
     command: >
@@ -73,10 +78,12 @@ services:
         apk add --no-cache git su-exec &&
         if [ ! -d /app/.git ]; then
           find /app -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&
-          git clone --branch \"$${VLLM_PROXY_SUITE_REF}\" \"$${VLLM_PROXY_SUITE_REPOSITORY}\" /app;
+          git clone --depth 1 --branch "$${VLLM_PROXY_SUITE_REF}" "$${VLLM_PROXY_SUITE_REPOSITORY}" /app;
         else
-          git -C /app remote set-url origin \"$${VLLM_PROXY_SUITE_REPOSITORY}\";
-          git -C /app pull --ff-only origin \"$${VLLM_PROXY_SUITE_REF}\";
+          git -c safe.directory=/app -C /app remote set-url origin "$${VLLM_PROXY_SUITE_REPOSITORY}" &&
+          git -c safe.directory=/app -C /app fetch --force --prune origin "$${VLLM_PROXY_SUITE_REF}" &&
+          git -c safe.directory=/app -C /app reset --hard FETCH_HEAD &&
+          git -c safe.directory=/app -C /app clean -fdx;
         fi &&
         chown -R node:node /app &&
         exec su-exec node node /app/vllm-proxy-suite.js

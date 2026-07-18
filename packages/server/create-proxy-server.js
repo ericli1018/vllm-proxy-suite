@@ -5,6 +5,7 @@ import http from 'node:http';
 import { BufferBudget } from '../core/buffer-budget.js';
 import { performBufferedAttempt } from '../core/attempt-runner.js';
 import { buildUpstreamHeaders, copyResponseHeaders, jsonResponse, readRequestBody, writeNodeResponseBody } from '../core/http.js';
+import { createLogger } from '../core/logger.js';
 
 function secureEqual(actual, expected) {
   if (!expected) return true;
@@ -43,9 +44,22 @@ export function renderProtocolMetrics(metrics, prefix) {
   return `${rows.join('\n')}\n`;
 }
 
-function log(config, event) {
-  if (['off', 'silent'].includes(String(config.logLevel).toLowerCase())) return;
-  process.stdout.write(`${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`);
+
+
+
+function summarizeToolResults(body) {
+  const summaries = [];
+  for (const message of Array.isArray(body?.messages) ? body.messages : []) {
+    if (message?.role === 'tool') {
+      summaries.push({ id: message.tool_call_id || null, name: message.name || null });
+      continue;
+    }
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const block of content) {
+      if (block?.type === 'tool_result') summaries.push({ id: block.tool_use_id || null, isError: Boolean(block.is_error) });
+    }
+  }
+  return summaries;
 }
 
 function recoverable(attempt) {
@@ -108,8 +122,10 @@ export function createProtocolProxyRuntime({
   formatJsonError,
   fetchImpl = globalThis.fetch,
   exposeControlRoutes = true,
+  logSink,
 }) {
   const metrics = createMetrics();
+  const rootLogger = createLogger(config, logSink);
   const budget = new BufferBudget(config.maxTotalBufferedBytes);
   let draining = false;
 
@@ -133,11 +149,15 @@ export function createProtocolProxyRuntime({
     if (metrics.activeRequests >= config.maxActiveRequests) return jsonResponse(response, 429, formatJsonError('too_many_requests', 'active request limit reached', null));
 
     const requestId = randomUUID();
+    const requestStartedAt = Date.now();
+    const requestLogger = rootLogger.child({ service: name, requestId, protocol: metricPrefix, path, method: request.method });
+    requestLogger.info('request_started', { guarded: guardedRoutes.has(path) });
     metrics.requestsTotal += 1;
     metrics.activeRequests += 1;
     const clientController = new AbortController();
     const onAbort = () => {
       if (!clientController.signal.aborted) {
+        requestLogger.warn('client_cancelled', { elapsedMs: Date.now() - requestStartedAt });
         metrics.clientCancellationsTotal += 1;
         clientController.abort('client_cancelled');
       }
@@ -148,6 +168,7 @@ export function createProtocolProxyRuntime({
     try {
       if (!guardedRoutes.has(path)) {
         metrics.passthroughTotal += 1;
+        requestLogger.debug('passthrough_started', { upstreamUrl: `${config.vllmBaseUrl}${parsedUrl.pathname}` });
         let body = null;
         if (!['GET', 'HEAD'].includes(request.method || 'GET')) body = await readRequestBody(request, config.maxRequestBodyBytes);
         const upstream = await fetchImpl(`${config.vllmBaseUrl}${parsedUrl.pathname}${parsedUrl.search}`, {
@@ -158,7 +179,9 @@ export function createProtocolProxyRuntime({
         });
         response.writeHead(upstream.status, copyResponseHeaders(upstream.headers));
         await writeNodeResponseBody(response, upstream.body);
-        return response.end();
+        response.end();
+        requestLogger.info('request_completed', { mode: 'passthrough', status: upstream.status, elapsedMs: Date.now() - requestStartedAt });
+        return;
       }
 
       if (request.method !== 'POST') return jsonResponse(response, 405, formatJsonError('method_not_allowed', 'guarded endpoint requires POST', requestId), { allow: 'POST' });
@@ -175,6 +198,8 @@ export function createProtocolProxyRuntime({
       } catch {
         return jsonResponse(response, 400, formatJsonError('invalid_request_json', 'request body must be valid JSON', requestId));
       }
+      const toolResults = summarizeToolResults(originalBody);
+      if (toolResults.length > 0) requestLogger.info('tool_results_received', { count: toolResults.length, results: toolResults });
       let firstBody;
       try {
         firstBody = route.prepareRequest(originalBody, { recovery: false, config });
@@ -183,6 +208,24 @@ export function createProtocolProxyRuntime({
       }
       const streaming = Boolean(firstBody.stream);
       const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
+      let lastTransportWarningAt = 0;
+      let lastSemanticWarningAt = 0;
+      const makeObserver = (attemptNumber, phase) => ({
+        onChunk(snapshot) { requestLogger.trace('upstream_chunk', { ...snapshot, phase }); },
+        onProgress(snapshot) {
+          const progress = { ...snapshot, phase, state: snapshot.state };
+          requestLogger.debug('request_progress', progress);
+          const now = Date.now();
+          if (snapshot.lastUpstreamActivityMs >= config.progressStallWarningMs && now - lastTransportWarningAt >= config.progressStallWarningMs) {
+            lastTransportWarningAt = now;
+            requestLogger.warn('transport_stall', progress);
+          }
+          if (snapshot.lastSemanticActivityMs >= config.progressStallWarningMs && now - lastSemanticWarningAt >= config.progressStallWarningMs) {
+            lastSemanticWarningAt = now;
+            requestLogger.warn('semantic_stall', progress);
+          }
+        },
+      });
       const attemptArgs = {
         fetchImpl,
         url: `${config.vllmBaseUrl}${parsedUrl.pathname}${parsedUrl.search}`,
@@ -199,6 +242,8 @@ export function createProtocolProxyRuntime({
         ...attemptArgs,
         requestBody: JSON.stringify(firstBody),
         timeoutMs: config.totalGenerationTimeoutMs,
+        observer: makeObserver(1, 'initial'),
+        attemptNumber: 1,
       });
       if (attempt.kind === 'success' && route.validateAttempt) {
         const semanticValidation = route.validateAttempt(attempt, {
@@ -219,13 +264,14 @@ export function createProtocolProxyRuntime({
       }
       if (attempt.kind === 'loop') {
         metrics.loopsDetectedTotal += 1;
-        log(config, { level: 'warn', service: name, requestId, event: 'loop_detected', reason: attempt.loopInfo.reason });
+        requestLogger.warn('loop_detected', { reason: attempt.loopInfo.reason, attempt: 1 });
       }
       if (attempt.kind === 'interrupted') metrics.upstreamInterruptionsTotal += 1;
       if (attempt.kind === 'cancelled') return;
 
       if (attempt.kind !== 'success' && config.maxRecoveryAttempts > 0 && recoverable(attempt)) {
         metrics.recoveriesTotal += 1;
+        requestLogger.info('recovery_started', { fromKind: attempt.kind, reason: attempt.loopInfo?.reason || attempt.reason || 'attempt_failed' });
         budget.release(requestId);
         const reason = {
           ok: false,
@@ -245,6 +291,8 @@ export function createProtocolProxyRuntime({
           ...attemptArgs,
           requestBody: JSON.stringify(recovery.body),
           timeoutMs: config.recoveryTimeoutMs,
+          observer: makeObserver(2, 'recovery'),
+          attemptNumber: 2,
         });
         if (attempt.kind === 'success' && route.validateAttempt) {
           const semanticValidation = route.validateAttempt(attempt, {
@@ -268,13 +316,36 @@ export function createProtocolProxyRuntime({
           const recoveryValidation = route.validateRecovery(attempt, recovery);
           if (!recoveryValidation.ok) attempt = { kind: 'invalid', ...recoveryValidation, result: attempt.result };
         }
-        if (attempt.kind === 'success') metrics.recoverySuccessTotal += 1;
+        if (attempt.kind === 'success') {
+          metrics.recoverySuccessTotal += 1;
+          requestLogger.info('recovery_completed', { elapsedMs: Date.now() - requestStartedAt });
+        }
       }
 
       heartbeat?.stop();
-      if (attempt.kind === 'success') return sendBufferedSuccess(response, attempt);
+      if (attempt.kind === 'success') {
+        const output = route.adapter.extractOutput?.(attempt.result) || { toolCalls: [], finalText: '' };
+        const toolCalls = Array.isArray(output.toolCalls) ? output.toolCalls : [];
+        if (toolCalls.length > 0) {
+          requestLogger.info('tool_calls_generated', {
+            count: toolCalls.length,
+            tools: toolCalls.map((tool) => ({ name: tool.name || tool.function?.name || 'unknown', id: tool.id || null })),
+          });
+        }
+        await sendBufferedSuccess(response, attempt);
+        requestLogger.info('request_completed', {
+          mode: 'guarded',
+          status: attempt.status || 200,
+          elapsedMs: Date.now() - requestStartedAt,
+          upstreamBytes: attempt.rawBody?.length || 0,
+          toolCallCount: toolCalls.length,
+          finalTextChars: typeof output.finalText === 'string' ? output.finalText.length : 0,
+        });
+        return;
+      }
       if (attempt.kind === 'cancelled') return;
       metrics.validationFailuresTotal += 1;
+      requestLogger.error('request_failed', { kind: attempt.kind, reason: attempt.reason || attempt.loopInfo?.reason || 'unknown', elapsedMs: Date.now() - requestStartedAt });
       const status = attempt.kind === 'http_error' && attempt.status < 500 ? attempt.status : 502;
       return sendGuardedFailure({
         response,
@@ -287,6 +358,7 @@ export function createProtocolProxyRuntime({
         formatJsonError,
       });
     } catch (error) {
+      requestLogger.error('proxy_error', { message: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - requestStartedAt });
       if (!clientController.signal.aborted) {
         jsonResponse(response, 502, formatJsonError('proxy_error', error instanceof Error ? error.message : String(error), requestId));
       }

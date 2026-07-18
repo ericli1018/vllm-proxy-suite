@@ -49,18 +49,25 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.3.0') errors.push('package.json version must be 0.3.0');
+if (packageJson.version !== '0.4.0') errors.push('package.json version must be 0.4.0');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
 if (!compose.includes('git clone')) errors.push('Compose must initialize the named volume from GitHub');
-if (!compose.includes('git -C /app pull --ff-only')) errors.push('Compose must update an existing repository with fast-forward-only pull');
+if (compose.includes('git config --global --add safe.directory /app')) errors.push('Compose must not rely on global safe.directory state');
+if (!compose.includes('git -c safe.directory=/app -C /app fetch --force --prune origin')) errors.push('Compose must fetch with command-local safe.directory');
+if (!compose.includes('git -c safe.directory=/app -C /app reset --hard FETCH_HEAD')) errors.push('Compose must reset with command-local safe.directory');
+if (!compose.includes('git -c safe.directory=/app -C /app clean -fdx')) errors.push('Compose must clean with command-local safe.directory');
+if (compose.includes('git -C /app pull')) errors.push('Compose must not use git pull for runtime synchronization');
 if (/nginx/i.test(compose)) errors.push('Compose must not contain Nginx');
 if (/3457|3458/.test(compose)) errors.push('Compose must not expose or reference internal protocol ports');
 if (!/ports:[\s\S]*3456:3456/.test(compose)) errors.push('Suite service must publish port 3456');
 if (!compose.includes('node /app/vllm-proxy-suite.js')) errors.push('Compose must start vllm-proxy-suite.js');
 if (!compose.includes('VLLM_CC_PROXY_API_KEY')) errors.push('Compose must expose the Anthropic API key');
 if (!compose.includes('VLLM_OPENAI_PROXY_API_KEY')) errors.push('Compose must expose the OpenAI API key');
+if (!compose.includes('PROGRESS_LOG_INTERVAL_MS')) errors.push('Compose must expose progress logging interval');
+if (!compose.includes('PROGRESS_STALL_WARNING_MS')) errors.push('Compose must expose stall warning threshold');
+if (!compose.includes('LOG_FORMAT')) errors.push('Compose must expose log format');
 
 const servicesPart = compose.split(/^services:\s*$/m)[1] || '';
 const serviceNames = [...servicesPart.matchAll(/^  ([a-zA-Z0-9_-]+):$/gm)].map((match) => match[1]);

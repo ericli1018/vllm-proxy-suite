@@ -15,7 +15,7 @@ test('package validator confirms required deployable artifacts', () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.valid, true);
   assert.equal(report.project, 'VLLM-PROXY-SUITE');
-  assert.equal(report.version, '0.3.0');
+  assert.equal(report.version, '0.4.0');
   assert.equal(report.architecture, 'single-process-javascript-gateway');
   assert.equal(report.repository, 'https://github.com/ericli1018/vllm-proxy-suite.git');
   assert.ok(report.files >= 20);

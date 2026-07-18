@@ -42,11 +42,47 @@ export async function performBufferedAttempt({
   bufferBudget,
   timeoutMs,
   clientSignal = null,
+  observer = null,
+  attemptNumber = 1,
 }) {
   const controller = new AbortController();
   const onClientAbort = () => controller.abort('client_cancelled');
   clientSignal?.addEventListener('abort', onClientAbort, { once: true });
   const totalTimeout = timeoutPromise(timeoutMs, () => controller.abort('generation_timeout'));
+  const startedAt = Date.now();
+  let upstreamBytes = 0;
+  let semanticProgress = 0;
+  let lastByteAtForProgress = startedAt;
+  let lastSemanticAtForProgress = startedAt;
+  let previousReportAt = startedAt;
+  let previousReportBytes = 0;
+  let streamFrames = 0;
+  const reportProgress = () => {
+    if (!observer?.onProgress) return;
+    const now = Date.now();
+    const elapsedMs = Math.max(1, now - startedAt);
+    const recentElapsedMs = Math.max(1, now - previousReportAt);
+    observer.onProgress({
+      requestId,
+      attempt: attemptNumber,
+      state: 'upstream_streaming',
+      elapsedMs,
+      upstreamBytes,
+      averageBytesPerSec: Math.round((upstreamBytes * 1000) / elapsedMs),
+      recentBytesPerSec: Math.round(((upstreamBytes - previousReportBytes) * 1000) / recentElapsedMs),
+      streamFrames,
+      semanticProgress,
+      bufferedBytes: upstreamBytes,
+      lastUpstreamActivityMs: now - lastByteAtForProgress,
+      lastSemanticActivityMs: now - lastSemanticAtForProgress,
+    });
+    previousReportAt = now;
+    previousReportBytes = upstreamBytes;
+  };
+  const progressTimer = observer?.onProgress && streaming
+    ? setInterval(reportProgress, config.progressLogIntervalMs || 10000)
+    : null;
+  progressTimer?.unref?.();
 
   try {
     let response;
@@ -77,6 +113,7 @@ export async function performBufferedAttempt({
       if (bytes + size > config.maxResponseBufferBytes) return 'response_buffer_limit';
       if (!bufferBudget.reserve(requestId, size)) return 'global_buffer_limit_exceeded';
       bytes += size;
+      upstreamBytes += size;
       chunks.push(Buffer.from(chunk));
       return null;
     };
@@ -123,6 +160,7 @@ export async function performBufferedAttempt({
       }
       if (read.done) break;
       lastByteAt = Date.now();
+      lastByteAtForProgress = lastByteAt;
       const violation = reserve(read.value);
       if (violation) {
         controller.abort(violation);
@@ -138,6 +176,7 @@ export async function performBufferedAttempt({
         return { kind: 'invalid', reason: 'stream_parse_error', message: safeMessage(error) };
       }
       const snapshot = parser.snapshot();
+      streamFrames += 1;
       const incremental = adapter.validateIncremental?.(snapshot, config);
       if (incremental && !incremental.ok) {
         controller.abort(incremental.reason);
@@ -151,9 +190,12 @@ export async function performBufferedAttempt({
         return { kind: 'loop', loopInfo, result: snapshot };
       }
       const progress = adapter.semanticProgress?.(snapshot) ?? bytes;
+      observer?.onChunk?.({ requestId, attempt: attemptNumber, chunkBytes: read.value.byteLength, upstreamBytes, streamFrames, semanticProgress: progress });
+      semanticProgress = progress;
       if (progress !== lastSemanticProgress) {
         lastSemanticProgress = progress;
         lastSemanticAt = Date.now();
+        lastSemanticAtForProgress = lastSemanticAt;
       } else if (Date.now() - lastSemanticAt >= config.semanticStallTimeoutMs) {
         controller.abort('semantic_stall_timeout');
         await reader.cancel('semantic_stall_timeout').catch(() => {});
@@ -174,6 +216,10 @@ export async function performBufferedAttempt({
     return { kind: 'success', rawBody: Buffer.concat(chunks), result, status: response.status, headers: response.headers };
   } finally {
     totalTimeout.clear();
+    if (progressTimer) {
+      clearInterval(progressTimer);
+      reportProgress();
+    }
     clientSignal?.removeEventListener('abort', onClientAbort);
   }
 }

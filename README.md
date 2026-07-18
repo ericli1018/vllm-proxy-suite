@@ -147,10 +147,13 @@ VLLM_PROXY_SUITE_REPOSITORY=https://github.com/ericli1018/vllm-proxy-suite.git
 VLLM_PROXY_SUITE_REF=main
 ```
 
-第一次啟動會 `git clone`；named volume 已有 Repository 時會執行：
+第一次啟動會以 shallow clone 初始化；named volume 已有 Repository 時會先將 `/app` 設為 Git safe directory，再強制同步指定 ref：
 
 ```text
-git -C /app pull --ff-only origin <ref>
+git -c safe.directory=/app -C /app <command>
+git -C /app fetch --force --prune origin <ref>
+git -C /app reset --hard FETCH_HEAD
+git -C /app clean -fdx
 ```
 
 若正式環境要求可重現部署，應將 `VLLM_PROXY_SUITE_REF` 固定至 release branch／tag，或使用本專案 Dockerfile 建立不可變 Image。
@@ -327,3 +330,33 @@ npm run check
 - 建議由外層 TLS Terminator／Ingress 提供 HTTPS。
 - 不要向不可信網路直接暴露 vLLM port。
 - Runtime Git 更新模式方便單機維護，但會讓重啟取得新 commit；正式固定版本部署應使用 tag 或自行 Build Dockerfile。
+
+## Request progress logging
+
+The suite uses structured log levels. Payload text, reasoning, source code, and tool results are not logged by default.
+
+| Level | Events |
+|---|---|
+| `error` | unrecoverable upstream, protocol, buffer, recovery, and request failures |
+| `warn` | loop detection, client cancellation, transport stall, semantic stall |
+| `info` | request start/completion, recovery lifecycle, generated tool calls, received tool results |
+| `debug` | periodic request progress with average/recent bytes per second, buffer size, frame count, and activity ages |
+| `trace` | one metadata record per upstream stream chunk; payload contents remain excluded |
+
+Recommended troubleshooting settings:
+
+```yaml
+LOG_LEVEL: "debug"
+LOG_FORMAT: "text"
+PROGRESS_LOG_INTERVAL_MS: "10000"
+PROGRESS_STALL_WARNING_MS: "30000"
+LOG_TOOL_PAYLOADS: "false"
+```
+
+Example debug record:
+
+```text
+[debug] event=request_progress service=vllm-openai-proxy requestId=... phase=initial attempt=1 elapsedMs=40000 upstreamBytes=18240 averageBytesPerSec=456 recentBytesPerSec=612 streamFrames=93 semanticProgress=7412 bufferedBytes=18240 lastUpstreamActivityMs=183 lastSemanticActivityMs=183
+```
+
+When Hermes appears stuck after a tool call, correlate `tool_calls_generated` from one request with `tool_results_received` on the next request. If no next request appears, the wait is outside the proxy; if it appears and progress remains at zero, the proxy is waiting for vLLM.

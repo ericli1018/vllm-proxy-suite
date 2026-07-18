@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+- Added level-aware structured logging (`error`, `warn`, `info`, `debug`, `trace`).
+- Added 10-second configurable request progress reporting with average and recent upstream bytes/sec.
+- Added transport and semantic stall warnings.
+- Added tool-call generation and tool-result receipt correlation without logging payload contents.
+- Added request lifecycle, recovery lifecycle, cancellation, and completion records.
+- Added Compose controls for log level, format, progress interval, stall threshold, and payload policy.
+
+
+## 0.3.2
+
+- Fixed Docker named-volume restarts failing with Git `dubious ownership` by registering `/app` as a safe directory before repository access.
+- Replaced runtime `git pull --ff-only` with deterministic `fetch --force --prune`, `reset --hard FETCH_HEAD`, and `clean -fdx`.
+- Kept the single JavaScript Gateway service and single published port `3456`.
+
 ## 0.3.0 - 2026-07-18
 
 - Replace the Nginx Gateway and dual protocol processes with one Node.js Gateway process.

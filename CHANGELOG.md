@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 - 2026-07-19
+
+- Replaced synthetic semantic scores with UTF-8 byte counters for reasoning, content, tool names, and fragmented tool arguments.
+- Separated upstream transport chunks from parsed SSE event counts.
+- Added monotonic request timing, headers/first-byte/first-semantic latency, stream-average throughput, memory estimates, and buffer utilization.
+- Added explicit upstream state transitions and terminal request lifecycle guarantees.
+- Added protected response replay lifecycle; Buffer Budget is retained until Node response `finish`.
+- Split tool-call readiness from replay completion and added bounded cross-request Tool Call/Tool Result correlation.
+- Added OpenAI Responses `function_call_output` result detection.
+- Added logger control-character escaping, reserved-field protection, and trace-only redacted payload previews.
+- Added regression coverage for metadata-only semantic stalls and fragmented tool-argument activity.
+
 ## 0.4.0
 
 - Added level-aware structured logging (`error`, `warn`, `info`, `debug`, `trace`).

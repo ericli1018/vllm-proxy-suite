@@ -6,6 +6,7 @@ import { resolve, relative, sep } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const required = [
   'README.md',
+  'docs/observability.md',
   'CHANGELOG.md',
   'package.json',
   'Dockerfile',
@@ -18,6 +19,7 @@ const required = [
   'packages/core/config.js',
   'packages/core/loop-detector.js',
   'packages/core/sse.js',
+  'packages/core/tool-correlation.js',
   'packages/anthropic/messages.js',
   'packages/anthropic/claude-code-tools/recovery.js',
   'packages/openai/chat-completions.js',
@@ -49,7 +51,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.4.0') errors.push('package.json version must be 0.4.0');
+if (packageJson.version !== '0.5.0') errors.push('package.json version must be 0.5.0');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -68,6 +70,8 @@ if (!compose.includes('VLLM_OPENAI_PROXY_API_KEY')) errors.push('Compose must ex
 if (!compose.includes('PROGRESS_LOG_INTERVAL_MS')) errors.push('Compose must expose progress logging interval');
 if (!compose.includes('PROGRESS_STALL_WARNING_MS')) errors.push('Compose must expose stall warning threshold');
 if (!compose.includes('LOG_FORMAT')) errors.push('Compose must expose log format');
+if (!compose.includes('TOOL_CORRELATION_TTL_MS')) errors.push('Compose must expose tool correlation TTL');
+if (!compose.includes('TOOL_CORRELATION_MAX_ENTRIES')) errors.push('Compose must expose tool correlation capacity');
 
 const servicesPart = compose.split(/^services:\s*$/m)[1] || '';
 const serviceNames = [...servicesPart.matchAll(/^  ([a-zA-Z0-9_-]+):$/gm)].map((match) => match[1]);

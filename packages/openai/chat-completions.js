@@ -26,28 +26,37 @@ function createToolCall(index) {
   };
 }
 
-function appendContent(target, value) {
-  if (typeof value === 'string') return target + value;
+function contentDeltaText(value) {
+  if (typeof value === 'string') return value;
   if (Array.isArray(value)) {
-    return target + value.map((item) => {
+    return value.map((item) => {
       if (typeof item === 'string') return item;
       return typeof item?.text === 'string' ? item.text : '';
     }).join('');
   }
-  return target;
+  return '';
 }
 
 function absorbToolCalls(choice, toolCalls) {
-  if (!Array.isArray(toolCalls)) return;
+  let toolNameBytes = 0;
+  let toolArgumentBytes = 0;
+  if (!Array.isArray(toolCalls)) return { toolNameBytes, toolArgumentBytes };
   for (const delta of toolCalls) {
     const index = Number.isInteger(delta?.index) ? delta.index : choice.toolCalls.size;
     const tool = choice.toolCalls.get(index) || createToolCall(index);
     if (typeof delta?.id === 'string') tool.id = delta.id;
     if (typeof delta?.type === 'string') tool.type = delta.type;
-    if (typeof delta?.function?.name === 'string') tool.name += delta.function.name;
-    if (typeof delta?.function?.arguments === 'string') tool.arguments += delta.function.arguments;
+    if (typeof delta?.function?.name === 'string') {
+      tool.name += delta.function.name;
+      toolNameBytes += Buffer.byteLength(delta.function.name, 'utf8');
+    }
+    if (typeof delta?.function?.arguments === 'string') {
+      tool.arguments += delta.function.arguments;
+      toolArgumentBytes += Buffer.byteLength(delta.function.arguments, 'utf8');
+    }
     choice.toolCalls.set(index, tool);
   }
+  return { toolNameBytes, toolArgumentBytes };
 }
 
 function finalizeTools(choices) {
@@ -73,6 +82,10 @@ class ChatCompletionsStreamParser {
     this.choices = new Map();
     this.chunkCount = 0;
     this.usage = null;
+    this.reasoningBytes = 0;
+    this.contentBytes = 0;
+    this.toolNameBytes = 0;
+    this.toolArgumentBytes = 0;
   }
 
   push(chunk) {
@@ -106,10 +119,20 @@ class ChatCompletionsStreamParser {
       const index = Number.isInteger(item?.index) ? item.index : 0;
       const choice = this.choices.get(index) || createChoice(index);
       const delta = item?.delta || {};
-      choice.content = appendContent(choice.content, delta.content);
-      if (typeof delta.reasoning === 'string') choice.reasoning += delta.reasoning;
-      if (typeof delta.reasoning_content === 'string') choice.reasoning += delta.reasoning_content;
-      absorbToolCalls(choice, delta.tool_calls);
+      const contentDelta = contentDeltaText(delta.content);
+      choice.content += contentDelta;
+      this.contentBytes += Buffer.byteLength(contentDelta, 'utf8');
+      if (typeof delta.reasoning === 'string') {
+        choice.reasoning += delta.reasoning;
+        this.reasoningBytes += Buffer.byteLength(delta.reasoning, 'utf8');
+      }
+      if (typeof delta.reasoning_content === 'string') {
+        choice.reasoning += delta.reasoning_content;
+        this.reasoningBytes += Buffer.byteLength(delta.reasoning_content, 'utf8');
+      }
+      const toolDelta = absorbToolCalls(choice, delta.tool_calls);
+      this.toolNameBytes += toolDelta.toolNameBytes;
+      this.toolArgumentBytes += toolDelta.toolArgumentBytes;
       if (item?.finish_reason !== undefined && item.finish_reason !== null) choice.finishReason = item.finish_reason;
       this.choices.set(index, choice);
     }
@@ -123,6 +146,13 @@ class ChatCompletionsStreamParser {
       choices: this.choices,
       chunkCount: this.chunkCount,
       usage: this.usage,
+      semanticMetrics: {
+        reasoningBytes: this.reasoningBytes,
+        contentBytes: this.contentBytes,
+        toolNameBytes: this.toolNameBytes,
+        toolArgumentBytes: this.toolArgumentBytes,
+        semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
+      },
     };
   }
 
@@ -161,7 +191,7 @@ function normalizeNonStream(payload) {
       const index = Number.isInteger(item?.index) ? item.index : 0;
       const choice = createChoice(index);
       const message = item?.message || {};
-      choice.content = appendContent('', message.content);
+      choice.content = contentDeltaText(message.content);
       if (typeof message.reasoning === 'string') choice.reasoning += message.reasoning;
       if (typeof message.reasoning_content === 'string') choice.reasoning += message.reasoning_content;
       absorbToolCalls(choice, message.tool_calls);
@@ -178,12 +208,32 @@ export const chatCompletionsAdapter = Object.freeze({
   path: '/v1/chat/completions',
   createStreamParser() { return new ChatCompletionsStreamParser(); },
   getReasoning(result) { return [...result.choices.values()].map((choice) => choice.reasoning).filter(Boolean); },
-  semanticProgress(result) {
-    let progress = result.chunkCount || 0;
-    for (const choice of result.choices.values()) progress += choice.content.length + choice.reasoning.length + choice.toolCalls.size * 17;
-    if (result.done) progress += 31;
-    return progress;
+  semanticMetrics(result) {
+    if (result.semanticMetrics) {
+      return { ...result.semanticMetrics, sseEvents: (result.chunkCount || 0) + (result.done ? 1 : 0) };
+    }
+    let reasoningBytes = 0;
+    let contentBytes = 0;
+    let toolNameBytes = 0;
+    let toolArgumentBytes = 0;
+    for (const choice of result.choices.values()) {
+      reasoningBytes += Buffer.byteLength(choice.reasoning || '', 'utf8');
+      contentBytes += Buffer.byteLength(choice.content || '', 'utf8');
+      for (const tool of choice.toolCalls.values()) {
+        toolNameBytes += Buffer.byteLength(tool.name || '', 'utf8');
+        toolArgumentBytes += Buffer.byteLength(tool.arguments || '', 'utf8');
+      }
+    }
+    return {
+      reasoningBytes,
+      contentBytes,
+      toolNameBytes,
+      toolArgumentBytes,
+      semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
+      sseEvents: (result.chunkCount || 0) + (result.done ? 1 : 0),
+    };
   },
+  semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
   validateIncremental(result, config) {
     if (result.error) return invalid('upstream_sse_error', result.error.message || 'upstream error');
     if (result.structuralErrors.length) return invalid(result.structuralErrors[0]);

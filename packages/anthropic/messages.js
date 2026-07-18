@@ -55,6 +55,10 @@ class AnthropicMessagesStreamParser {
     this.error = null;
     this.structuralErrors = [];
     this.eventCount = 0;
+    this.reasoningBytes = 0;
+    this.contentBytes = 0;
+    this.toolNameBytes = 0;
+    this.toolArgumentBytes = 0;
   }
 
   push(chunk) {
@@ -89,6 +93,12 @@ class AnthropicMessagesStreamParser {
           break;
         }
         const block = createBlock(index, payload.content_block || {});
+        this.reasoningBytes += Buffer.byteLength(block.thinking || '', 'utf8');
+        this.contentBytes += Buffer.byteLength(block.text || '', 'utf8');
+        if (block.type === 'tool_use') {
+          this.toolNameBytes += Buffer.byteLength(block.name || '', 'utf8');
+          if (block.input) this.toolArgumentBytes += Buffer.byteLength(JSON.stringify(block.input), 'utf8');
+        }
         this.blocks.push(block);
         this.blocksByIndex.set(index, block);
         break;
@@ -100,11 +110,17 @@ class AnthropicMessagesStreamParser {
           break;
         }
         const delta = payload?.delta || {};
-        if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') block.thinking += delta.thinking;
-        else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') block.signature = delta.signature;
-        else if (delta.type === 'text_delta' && typeof delta.text === 'string') block.text += delta.text;
-        else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') block.partialJson += delta.partial_json;
-        else block.rawDeltas.push(structuredClone(payload));
+        if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+          block.thinking += delta.thinking;
+          this.reasoningBytes += Buffer.byteLength(delta.thinking, 'utf8');
+        } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') block.signature = delta.signature;
+        else if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+          block.text += delta.text;
+          this.contentBytes += Buffer.byteLength(delta.text, 'utf8');
+        } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+          block.partialJson += delta.partial_json;
+          this.toolArgumentBytes += Buffer.byteLength(delta.partial_json, 'utf8');
+        } else block.rawDeltas.push(structuredClone(payload));
         break;
       }
       case 'content_block_stop': {
@@ -151,6 +167,13 @@ class AnthropicMessagesStreamParser {
       error: this.error,
       structuralErrors: [...this.structuralErrors],
       eventCount: this.eventCount,
+      semanticMetrics: {
+        reasoningBytes: this.reasoningBytes,
+        contentBytes: this.contentBytes,
+        toolNameBytes: this.toolNameBytes,
+        toolArgumentBytes: this.toolArgumentBytes,
+        semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
+      },
     };
   }
 
@@ -267,12 +290,30 @@ export const anthropicMessagesAdapter = Object.freeze({
   path: '/v1/messages',
   createStreamParser() { return new AnthropicMessagesStreamParser(); },
   getReasoning(result) { return result.blocks.filter((block) => block.type === 'thinking' && block.thinking).map((block) => block.thinking); },
-  semanticProgress(result) {
-    let progress = result.eventCount;
-    for (const block of result.blocks) progress += block.thinking.length + block.text.length + block.partialJson.length + (block.stopped ? 3 : 0);
-    if (result.messageStopped) progress += 31;
-    return progress;
+  semanticMetrics(result) {
+    if (result.semanticMetrics) return { ...result.semanticMetrics, sseEvents: result.eventCount || 0 };
+    let reasoningBytes = 0;
+    let contentBytes = 0;
+    let toolNameBytes = 0;
+    let toolArgumentBytes = 0;
+    for (const block of result.blocks) {
+      reasoningBytes += Buffer.byteLength(block.thinking || '', 'utf8');
+      contentBytes += Buffer.byteLength(block.text || '', 'utf8');
+      if (block.type === 'tool_use') {
+        toolNameBytes += Buffer.byteLength(block.name || '', 'utf8');
+        toolArgumentBytes += Buffer.byteLength(block.partialJson || '', 'utf8');
+      }
+    }
+    return {
+      reasoningBytes,
+      contentBytes,
+      toolNameBytes,
+      toolArgumentBytes,
+      semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
+      sseEvents: result.eventCount || 0,
+    };
   },
+  semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
   validateIncremental(result, config) {
     if (result.structuralErrors?.length) return invalid(result.structuralErrors[0]);
     if (result.blocks.length > config.maxContentItems) return invalid('too_many_content_blocks');

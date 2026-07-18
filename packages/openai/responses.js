@@ -32,6 +32,10 @@ class ResponsesStreamParser {
     this.functionCalls = new Map();
     this.eventCount = 0;
     this.response = null;
+    this.reasoningBytes = 0;
+    this.contentBytes = 0;
+    this.toolNameBytes = 0;
+    this.toolArgumentBytes = 0;
   }
 
   push(chunk) {
@@ -63,11 +67,17 @@ class ResponsesStreamParser {
       return;
     }
     if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') {
-      if (typeof payload.delta === 'string') this.reasoning += payload.delta;
+      if (typeof payload.delta === 'string') {
+        this.reasoning += payload.delta;
+        this.reasoningBytes += Buffer.byteLength(payload.delta, 'utf8');
+      }
       return;
     }
     if (type === 'response.output_text.delta') {
-      if (typeof payload.delta === 'string') this.outputText += payload.delta;
+      if (typeof payload.delta === 'string') {
+        this.outputText += payload.delta;
+        this.contentBytes += Buffer.byteLength(payload.delta, 'utf8');
+      }
       return;
     }
     if (type === 'response.output_item.added') {
@@ -75,8 +85,14 @@ class ResponsesStreamParser {
       if (item.type === 'function_call') {
         const id = item.id || item.call_id || String(payload.output_index ?? this.functionCalls.size);
         const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0);
-        if (typeof item.name === 'string') call.name = item.name;
-        if (typeof item.arguments === 'string') call.arguments = item.arguments;
+        if (typeof item.name === 'string') {
+          this.toolNameBytes += Math.max(0, Buffer.byteLength(item.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
+          call.name = item.name;
+        }
+        if (typeof item.arguments === 'string') {
+          this.toolArgumentBytes += Math.max(0, Buffer.byteLength(item.arguments, 'utf8') - Buffer.byteLength(call.arguments || '', 'utf8'));
+          call.arguments = item.arguments;
+        }
         this.functionCalls.set(id, call);
       }
       return;
@@ -84,7 +100,10 @@ class ResponsesStreamParser {
     if (type === 'response.function_call_arguments.delta') {
       const id = payload.item_id || payload.call_id || String(payload.output_index ?? 0);
       const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0);
-      if (typeof payload.delta === 'string') call.arguments += payload.delta;
+      if (typeof payload.delta === 'string') {
+        call.arguments += payload.delta;
+        this.toolArgumentBytes += Buffer.byteLength(payload.delta, 'utf8');
+      }
       this.functionCalls.set(id, call);
       return;
     }
@@ -93,8 +112,14 @@ class ResponsesStreamParser {
       if (item.type === 'function_call') {
         const id = item.id || item.call_id || String(payload.output_index ?? 0);
         const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0);
-        if (typeof item.name === 'string') call.name = item.name;
-        if (typeof item.arguments === 'string') call.arguments = item.arguments;
+        if (typeof item.name === 'string') {
+          this.toolNameBytes += Math.max(0, Buffer.byteLength(item.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
+          call.name = item.name;
+        }
+        if (typeof item.arguments === 'string') {
+          this.toolArgumentBytes += Math.max(0, Buffer.byteLength(item.arguments, 'utf8') - Buffer.byteLength(call.arguments || '', 'utf8'));
+          call.arguments = item.arguments;
+        }
         this.functionCalls.set(id, call);
       }
     }
@@ -111,6 +136,13 @@ class ResponsesStreamParser {
       functionCalls: this.functionCalls,
       eventCount: this.eventCount,
       response: this.response,
+      semanticMetrics: {
+        reasoningBytes: this.reasoningBytes,
+        contentBytes: this.contentBytes,
+        toolNameBytes: this.toolNameBytes,
+        toolArgumentBytes: this.toolArgumentBytes,
+        semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
+      },
     };
   }
 
@@ -170,7 +202,26 @@ export const responsesAdapter = Object.freeze({
   path: '/v1/responses',
   createStreamParser() { return new ResponsesStreamParser(); },
   getReasoning(result) { return result.reasoning ? [result.reasoning] : []; },
-  semanticProgress(result) { return result.eventCount + result.reasoning.length + result.outputText.length + result.functionCalls.size * 17 + (result.completed ? 31 : 0); },
+  semanticMetrics(result) {
+    if (result.semanticMetrics) return { ...result.semanticMetrics, sseEvents: result.eventCount || 0 };
+    const reasoningBytes = Buffer.byteLength(result.reasoning || '', 'utf8');
+    const contentBytes = Buffer.byteLength(result.outputText || '', 'utf8');
+    let toolNameBytes = 0;
+    let toolArgumentBytes = 0;
+    for (const call of result.functionCalls.values()) {
+      toolNameBytes += Buffer.byteLength(call.name || '', 'utf8');
+      toolArgumentBytes += Buffer.byteLength(call.arguments || '', 'utf8');
+    }
+    return {
+      reasoningBytes,
+      contentBytes,
+      toolNameBytes,
+      toolArgumentBytes,
+      semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
+      sseEvents: result.eventCount || 0,
+    };
+  },
+  semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
   validateIncremental(result, config) {
     if (result.failed || result.error) return invalid('upstream_response_error', result.error?.message || 'upstream error');
     if (result.structuralErrors?.length) return invalid(result.structuralErrors[0]);

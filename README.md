@@ -81,6 +81,12 @@ VLLM-PROXY-SUITE/
 node vllm-proxy-suite.js
 ```
 
+進度欄位、Hermes Tool Call 往返判讀與資料安全說明見：
+
+```text
+docs/observability.md
+```
+
 Anthropic 與 OpenAI 僅作為 in-process runtime 模組，不提供獨立對外 listener。
 
 ## 必要環境
@@ -333,15 +339,15 @@ npm run check
 
 ## Request progress logging
 
-The suite uses structured log levels. Payload text, reasoning, source code, and tool results are not logged by default.
+The suite uses structured log levels. Reasoning, response text, source code, tool arguments and tool results are not logged by default.
 
 | Level | Events |
 |---|---|
-| `error` | unrecoverable upstream, protocol, buffer, recovery, and request failures |
-| `warn` | loop detection, client cancellation, transport stall, semantic stall |
-| `info` | request start/completion, recovery lifecycle, generated tool calls, received tool results |
-| `debug` | periodic request progress with average/recent bytes per second, buffer size, frame count, and activity ages |
-| `trace` | one metadata record per upstream stream chunk; payload contents remain excluded |
+| `error` | unrecoverable upstream, protocol, buffer, recovery, replay, and request failures |
+| `warn` | loop detection, client cancellation, transport stall, semantic stall, and rejected requests |
+| `info` | request lifecycle, recovery lifecycle, tool calls ready/replayed, tool results received, and response replay lifecycle |
+| `debug` | state transitions and periodic request progress with throughput, semantic byte counters, buffer estimates, and timing |
+| `trace` | upstream chunk metadata; optional redacted and truncated tool payload previews when explicitly enabled |
 
 Recommended troubleshooting settings:
 
@@ -351,12 +357,60 @@ LOG_FORMAT: "text"
 PROGRESS_LOG_INTERVAL_MS: "10000"
 PROGRESS_STALL_WARNING_MS: "30000"
 LOG_TOOL_PAYLOADS: "false"
+TOOL_CORRELATION_TTL_MS: "900000"
+TOOL_CORRELATION_MAX_ENTRIES: "10000"
 ```
 
 Example debug record:
 
 ```text
-[debug] event=request_progress service=vllm-openai-proxy requestId=... phase=initial attempt=1 elapsedMs=40000 upstreamBytes=18240 averageBytesPerSec=456 recentBytesPerSec=612 streamFrames=93 semanticProgress=7412 bufferedBytes=18240 lastUpstreamActivityMs=183 lastSemanticActivityMs=183
+2026-07-19T00:00:00.000Z [debug] event=request_progress service="vllm-openai-proxy" requestId="..." phase="initial" attempt=1 state="upstream_streaming" elapsedMs=40000 upstreamBytes=18240 averageBytesPerSec=456 streamAverageBytesPerSec=612 recentBytesPerSec=590 upstreamChunks=93 sseEvents=147 reasoningBytes=7412 contentBytes=0 toolNameBytes=4 toolArgumentBytes=128 semanticBytes=7544 rawBufferedBytes=18240 estimatedRequestMemoryBytes=25784 globalBufferedBytes=18240 lastUpstreamActivityMs=183 lastSemanticActivityMs=183 timeToHeadersMs=12 timeToFirstByteMs=845 timeToFirstSemanticMs=901
 ```
 
-When Hermes appears stuck after a tool call, correlate `tool_calls_generated` from one request with `tool_results_received` on the next request. If no next request appears, the wait is outside the proxy; if it appears and progress remains at zero, the proxy is waiting for vLLM.
+The counters have distinct meanings:
+
+- `upstreamChunks`: calls to the upstream stream reader. This is transport chunking, not an SSE frame count.
+- `sseEvents`: complete protocol events parsed by the active adapter.
+- `semanticBytes`: UTF-8 bytes from reasoning, content, tool names and fragmented tool arguments only. Metadata, role-only chunks, usage, ping, completion markers and `[DONE]` do not increment it.
+- `lastUpstreamActivityMs`: time since any upstream bytes arrived.
+- `lastSemanticActivityMs`: time since actual semantic bytes increased.
+- `rawBufferedBytes`: raw upstream bytes retained for Protected Streaming.
+- `estimatedRequestMemoryBytes`: diagnostic estimate including raw and parsed data; it is not a Node heap accounting metric.
+
+Request states include:
+
+```text
+upstream_connecting
+upstream_headers_received
+upstream_waiting_first_byte
+upstream_streaming
+attempt_validating
+response_replay_started / response_replay_completed
+```
+
+For Hermes tool-loop diagnosis, use this event sequence:
+
+```text
+tool_calls_ready
+response_replay_started
+response_replay_completed
+tool_calls_delivered
+request_completed
+
+# Next Hermes request
+tool_results_received parentRequestIds=[...]
+```
+
+`tool_calls_delivered` means Node emitted `finish` for the protected response replay. It confirms that the response bytes were handed to the outgoing stream, but it is not an application-level acknowledgement from Hermes. `tool_results_received` is the stronger evidence that Hermes parsed the call, executed the tool, and submitted the next request. Tool-call correlation is bounded by `TOOL_CORRELATION_TTL_MS` and `TOOL_CORRELATION_MAX_ENTRIES`.
+
+Every logged `request_started` terminates with exactly one of:
+
+```text
+request_completed
+request_rejected
+request_failed
+request_cancelled
+```
+
+If `LOG_TOOL_PAYLOADS=true`, previews are emitted only at `trace`, are size-limited by `LOG_TOOL_PAYLOAD_MAX_BYTES`, and redact common credential fields. Keep this disabled in normal operation.
+

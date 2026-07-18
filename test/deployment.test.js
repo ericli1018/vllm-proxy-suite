@@ -36,6 +36,8 @@ test('Compose exposes both protocol-specific API keys on the single service', as
     'VLLM_OPENAI_PROXY_API_KEY',
     'CLAUDE_CODE_TOOL_RECOVERY_ENABLED',
     'RECOVERY_NETWORK_LOOKUP_TOOL_NAMES',
+    'TOOL_CORRELATION_TTL_MS',
+    'TOOL_CORRELATION_MAX_ENTRIES',
   ]) {
     assert.match(compose, new RegExp(name));
   }

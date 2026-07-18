@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+
 import { detectReasoningLoop } from './loop-detector.js';
 
 function safeMessage(error) {
@@ -29,6 +31,26 @@ async function readBoundedText(response, limit = 4096) {
   return text.slice(0, limit);
 }
 
+function emptySemanticMetrics() {
+  return {
+    reasoningBytes: 0,
+    contentBytes: 0,
+    toolNameBytes: 0,
+    toolArgumentBytes: 0,
+    semanticBytes: 0,
+    sseEvents: 0,
+  };
+}
+
+function getSemanticMetrics(adapter, snapshot, { allowLegacy = true } = {}) {
+  const metrics = adapter.semanticMetrics?.(snapshot);
+  if (!metrics) {
+    const semanticBytes = allowLegacy ? (adapter.semanticProgress?.(snapshot) ?? 0) : 0;
+    return { ...emptySemanticMetrics(), semanticBytes };
+  }
+  return { ...emptySemanticMetrics(), ...metrics };
+}
+
 export async function performBufferedAttempt({
   fetchImpl = globalThis.fetch,
   url,
@@ -49,36 +71,76 @@ export async function performBufferedAttempt({
   const onClientAbort = () => controller.abort('client_cancelled');
   clientSignal?.addEventListener('abort', onClientAbort, { once: true });
   const totalTimeout = timeoutPromise(timeoutMs, () => controller.abort('generation_timeout'));
-  const startedAt = Date.now();
-  let upstreamBytes = 0;
-  let semanticProgress = 0;
-  let lastByteAtForProgress = startedAt;
-  let lastSemanticAtForProgress = startedAt;
-  let previousReportAt = startedAt;
+
+  const startedAtMono = performance.now();
+  let currentState = null;
+  let headersAtMono = null;
+  let firstByteAtMono = null;
+  let firstSemanticAtMono = null;
+  let lastByteAtMono = startedAtMono;
+  let lastSemanticAtMono = startedAtMono;
+  let previousReportAtMono = startedAtMono;
   let previousReportBytes = 0;
-  let streamFrames = 0;
+  let upstreamBytes = 0;
+  let upstreamChunks = 0;
+  let semantic = emptySemanticMetrics();
+  let rawBufferedBytes = 0;
+  let concatAllocated = false;
+
+  const setState = (state, fields = {}) => {
+    if (currentState === state && Object.keys(fields).length === 0) return;
+    currentState = state;
+    observer?.onState?.({ requestId, attempt: attemptNumber, state, ...fields });
+  };
+  setState('upstream_connecting');
+
   const reportProgress = () => {
     if (!observer?.onProgress) return;
-    const now = Date.now();
-    const elapsedMs = Math.max(1, now - startedAt);
-    const recentElapsedMs = Math.max(1, now - previousReportAt);
+    const now = performance.now();
+    const elapsedMs = Math.max(1, now - startedAtMono);
+    const recentElapsedMs = Math.max(1, now - previousReportAtMono);
+    const pendingReplayBytes = currentState === 'response_replaying' ? rawBufferedBytes : 0;
+    const estimatedRequestMemoryBytes = rawBufferedBytes
+      + (semantic.semanticBytes * 2)
+      + (concatAllocated ? rawBufferedBytes : 0)
+      + pendingReplayBytes;
     observer.onProgress({
       requestId,
       attempt: attemptNumber,
-      state: 'upstream_streaming',
-      elapsedMs,
+      state: currentState,
+      elapsedMs: Math.round(elapsedMs),
       upstreamBytes,
       averageBytesPerSec: Math.round((upstreamBytes * 1000) / elapsedMs),
+      streamElapsedMs: firstByteAtMono === null ? 0 : Math.round(Math.max(1, now - firstByteAtMono)),
+      streamAverageBytesPerSec: firstByteAtMono === null ? 0 : Math.round((upstreamBytes * 1000) / Math.max(1, now - firstByteAtMono)),
       recentBytesPerSec: Math.round(((upstreamBytes - previousReportBytes) * 1000) / recentElapsedMs),
-      streamFrames,
-      semanticProgress,
-      bufferedBytes: upstreamBytes,
-      lastUpstreamActivityMs: now - lastByteAtForProgress,
-      lastSemanticActivityMs: now - lastSemanticAtForProgress,
+      upstreamChunks,
+      sseEvents: semantic.sseEvents,
+      reasoningBytes: semantic.reasoningBytes,
+      contentBytes: semantic.contentBytes,
+      toolNameBytes: semantic.toolNameBytes,
+      toolArgumentBytes: semantic.toolArgumentBytes,
+      semanticBytes: semantic.semanticBytes,
+      semanticProgress: semantic.semanticBytes,
+      rawBufferedBytes,
+      bufferedBytes: rawBufferedBytes,
+      parsedSemanticBytes: semantic.semanticBytes,
+      estimatedRequestMemoryBytes,
+      pendingReplayBytes,
+      globalBufferedBytes: bufferBudget.total,
+      globalBufferLimitBytes: bufferBudget.limit,
+      globalBufferUtilization: bufferBudget.limit > 0 ? Number((bufferBudget.total / bufferBudget.limit).toFixed(6)) : 0,
+      lastUpstreamActivityMs: Math.round(now - lastByteAtMono),
+      lastSemanticActivityMs: Math.round(now - lastSemanticAtMono),
+      timeToHeadersMs: headersAtMono === null ? null : Math.round(headersAtMono - startedAtMono),
+      timeToFirstByteMs: firstByteAtMono === null ? null : Math.round(firstByteAtMono - startedAtMono),
+      timeToFirstSemanticMs: firstSemanticAtMono === null ? null : Math.round(firstSemanticAtMono - startedAtMono),
+      semanticElapsedMs: firstSemanticAtMono === null ? 0 : Math.round(Math.max(0, now - firstSemanticAtMono)),
     });
-    previousReportAt = now;
+    previousReportAtMono = now;
     previousReportBytes = upstreamBytes;
   };
+
   const progressTimer = observer?.onProgress && streaming
     ? setInterval(reportProgress, config.progressLogIntervalMs || 10000)
     : null;
@@ -91,6 +153,10 @@ export async function performBufferedAttempt({
         fetchImpl(url, { method, headers, body: requestBody, signal: controller.signal }),
         totalTimeout.promise,
       ]);
+      headersAtMono = performance.now();
+      lastByteAtMono = headersAtMono;
+      lastSemanticAtMono = headersAtMono;
+      setState('upstream_headers_received', { timeToHeadersMs: Math.round(headersAtMono - startedAtMono) });
     } catch (error) {
       if (clientSignal?.aborted) return { kind: 'cancelled', reason: 'client_cancelled' };
       return { kind: 'interrupted', reason: controller.signal.reason || 'upstream_fetch_failed', message: safeMessage(error) };
@@ -113,21 +179,33 @@ export async function performBufferedAttempt({
       if (bytes + size > config.maxResponseBufferBytes) return 'response_buffer_limit';
       if (!bufferBudget.reserve(requestId, size)) return 'global_buffer_limit_exceeded';
       bytes += size;
+      rawBufferedBytes = bytes;
       upstreamBytes += size;
       chunks.push(Buffer.from(chunk));
       return null;
     };
 
     if (!streaming) {
+      setState('upstream_waiting_first_byte');
       const data = new Uint8Array(await response.arrayBuffer());
+      firstByteAtMono = performance.now();
+      lastByteAtMono = firstByteAtMono;
+      upstreamChunks = data.byteLength > 0 ? 1 : 0;
       const violation = reserve(data);
       if (violation) return { kind: 'invalid', reason: violation };
       let result;
       try {
         result = adapter.parseJson(Buffer.concat(chunks), config);
+        concatAllocated = true;
       } catch (error) {
         return { kind: 'invalid', reason: 'invalid_json_response', message: safeMessage(error) };
       }
+      semantic = getSemanticMetrics(adapter, result, { allowLegacy: false });
+      if (semantic.semanticBytes > 0) {
+        firstSemanticAtMono = performance.now();
+        lastSemanticAtMono = firstSemanticAtMono;
+      }
+      setState('attempt_validating');
       const loopInfo = detectFromTexts(adapter.getJsonReasoning?.(result) || [], config);
       if (loopInfo) return { kind: 'loop', loopInfo, result };
       const validation = adapter.validateJson(result, config);
@@ -142,12 +220,11 @@ export async function performBufferedAttempt({
 
     const parser = adapter.createStreamParser(config);
     const reader = response.body.getReader();
-    let lastByteAt = Date.now();
-    let lastSemanticAt = Date.now();
-    let lastSemanticProgress = 0;
+    let lastSemanticBytes = 0;
+    setState('upstream_waiting_first_byte');
 
     while (true) {
-      const remaining = Math.max(1, config.upstreamIdleTimeoutMs - (Date.now() - lastByteAt));
+      const remaining = Math.max(1, config.upstreamIdleTimeoutMs - (performance.now() - lastByteAtMono));
       const idleTimeout = timeoutPromise(remaining, () => controller.abort('upstream_idle_timeout'));
       let read;
       try {
@@ -159,8 +236,13 @@ export async function performBufferedAttempt({
         idleTimeout.clear();
       }
       if (read.done) break;
-      lastByteAt = Date.now();
-      lastByteAtForProgress = lastByteAt;
+
+      const now = performance.now();
+      if (firstByteAtMono === null) firstByteAtMono = now;
+      lastByteAtMono = now;
+      upstreamChunks += 1;
+      setState('upstream_streaming');
+
       const violation = reserve(read.value);
       if (violation) {
         controller.abort(violation);
@@ -176,7 +258,6 @@ export async function performBufferedAttempt({
         return { kind: 'invalid', reason: 'stream_parse_error', message: safeMessage(error) };
       }
       const snapshot = parser.snapshot();
-      streamFrames += 1;
       const incremental = adapter.validateIncremental?.(snapshot, config);
       if (incremental && !incremental.ok) {
         controller.abort(incremental.reason);
@@ -189,14 +270,22 @@ export async function performBufferedAttempt({
         await reader.cancel(loopInfo.reason).catch(() => {});
         return { kind: 'loop', loopInfo, result: snapshot };
       }
-      const progress = adapter.semanticProgress?.(snapshot) ?? bytes;
-      observer?.onChunk?.({ requestId, attempt: attemptNumber, chunkBytes: read.value.byteLength, upstreamBytes, streamFrames, semanticProgress: progress });
-      semanticProgress = progress;
-      if (progress !== lastSemanticProgress) {
-        lastSemanticProgress = progress;
-        lastSemanticAt = Date.now();
-        lastSemanticAtForProgress = lastSemanticAt;
-      } else if (Date.now() - lastSemanticAt >= config.semanticStallTimeoutMs) {
+
+      semantic = getSemanticMetrics(adapter, snapshot);
+      observer?.onChunk?.({
+        requestId,
+        attempt: attemptNumber,
+        chunkBytes: read.value.byteLength,
+        upstreamBytes,
+        upstreamChunks,
+        sseEvents: semantic.sseEvents,
+        semanticBytes: semantic.semanticBytes,
+      });
+      if (semantic.semanticBytes !== lastSemanticBytes) {
+        lastSemanticBytes = semantic.semanticBytes;
+        lastSemanticAtMono = performance.now();
+        if (firstSemanticAtMono === null && semantic.semanticBytes > 0) firstSemanticAtMono = lastSemanticAtMono;
+      } else if (performance.now() - lastSemanticAtMono >= config.semanticStallTimeoutMs) {
         controller.abort('semantic_stall_timeout');
         await reader.cancel('semantic_stall_timeout').catch(() => {});
         return { kind: 'invalid', reason: 'semantic_stall_timeout', result: snapshot };
@@ -209,6 +298,9 @@ export async function performBufferedAttempt({
     } catch (error) {
       return { kind: 'invalid', reason: 'stream_finish_error', message: safeMessage(error) };
     }
+    semantic = getSemanticMetrics(adapter, result);
+    concatAllocated = true;
+    setState('attempt_validating');
     const finalLoop = detectFromTexts(adapter.getReasoning(result) || [], config);
     if (finalLoop) return { kind: 'loop', loopInfo: finalLoop, result };
     const validation = adapter.validateStream(result, config);
@@ -216,10 +308,8 @@ export async function performBufferedAttempt({
     return { kind: 'success', rawBody: Buffer.concat(chunks), result, status: response.status, headers: response.headers };
   } finally {
     totalTimeout.clear();
-    if (progressTimer) {
-      clearInterval(progressTimer);
-      reportProgress();
-    }
+    if (progressTimer) clearInterval(progressTimer);
+    if (observer?.onProgress) reportProgress();
     clientSignal?.removeEventListener('abort', onClientAbort);
   }
 }

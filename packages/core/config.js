@@ -66,5 +66,7 @@ export function loadCommonConfig(env = process.env, defaults = {}) {
     progressStallWarningMs: parseInteger(env.PROGRESS_STALL_WARNING_MS, 30000, { min: 1000 }),
     logToolPayloads: parseBoolean(env.LOG_TOOL_PAYLOADS, false),
     logToolPayloadMaxBytes: parseInteger(env.LOG_TOOL_PAYLOAD_MAX_BYTES, 1024, { min: 0 }),
+    toolCorrelationTtlMs: parseInteger(env.TOOL_CORRELATION_TTL_MS, 15 * 60 * 1000, { min: 1000 }),
+    toolCorrelationMaxEntries: parseInteger(env.TOOL_CORRELATION_MAX_ENTRIES, 10000, { min: 1 }),
   });
 }

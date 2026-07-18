@@ -1,11 +1,13 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import http from 'node:http';
+import { performance } from 'node:perf_hooks';
 
 import { BufferBudget } from '../core/buffer-budget.js';
 import { performBufferedAttempt } from '../core/attempt-runner.js';
 import { buildUpstreamHeaders, copyResponseHeaders, jsonResponse, readRequestBody, writeNodeResponseBody } from '../core/http.js';
 import { createLogger } from '../core/logger.js';
+import { ToolCallCorrelationRegistry } from '../core/tool-correlation.js';
 
 function secureEqual(actual, expected) {
   if (!expected) return true;
@@ -31,6 +33,7 @@ function createMetrics() {
     upstreamInterruptionsTotal: 0,
     validationFailuresTotal: 0,
     clientCancellationsTotal: 0,
+    responseReplayInterruptionsTotal: 0,
   };
 }
 
@@ -44,9 +47,6 @@ export function renderProtocolMetrics(metrics, prefix) {
   return `${rows.join('\n')}\n`;
 }
 
-
-
-
 function summarizeToolResults(body) {
   const summaries = [];
   for (const message of Array.isArray(body?.messages) ? body.messages : []) {
@@ -57,6 +57,12 @@ function summarizeToolResults(body) {
     const content = Array.isArray(message?.content) ? message.content : [];
     for (const block of content) {
       if (block?.type === 'tool_result') summaries.push({ id: block.tool_use_id || null, isError: Boolean(block.is_error) });
+    }
+  }
+  const responsesInput = Array.isArray(body?.input) ? body.input : [];
+  for (const item of responsesInput) {
+    if (item?.type === 'function_call_output') {
+      summaries.push({ id: item.call_id || item.id || null, name: item.name || null, isError: Boolean(item.error) });
     }
   }
   return summaries;
@@ -90,11 +96,41 @@ function startHeartbeat(response, intervalMs) {
   return { stop: () => clearInterval(timer), wasSent: () => sent };
 }
 
+function endResponseAndWait(response, body = null) {
+  if (response.writableFinished) return Promise.resolve({ finished: true });
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const cleanup = () => {
+      response.removeListener('finish', onFinish);
+      response.removeListener('close', onClose);
+      response.removeListener('error', onError);
+    };
+    const onFinish = () => {
+      finished = true;
+      cleanup();
+      resolve({ finished: true });
+    };
+    const onClose = () => {
+      cleanup();
+      if (finished) resolve({ finished: true });
+      else reject(new Error('response_closed_before_finish'));
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    response.once('finish', onFinish);
+    response.once('close', onClose);
+    response.once('error', onError);
+    response.end(body ?? undefined);
+  });
+}
+
 async function sendBufferedSuccess(response, attempt) {
   if (!response.headersSent) {
     response.writeHead(attempt.status || 200, copyResponseHeaders(attempt.headers, { bodyLength: attempt.rawBody.length }));
   }
-  response.end(attempt.rawBody);
+  return endResponseAndWait(response, attempt.rawBody);
 }
 
 async function sendGuardedFailure({ response, route, streaming, status, type, message, requestId, formatJsonError }) {
@@ -107,10 +143,53 @@ async function sendGuardedFailure({ response, route, streaming, status, type, me
         'x-accel-buffering': 'no',
       });
     }
-    response.end(route.adapter.streamError(error));
+    await endResponseAndWait(response, route.adapter.streamError(error)).catch(() => {});
     return;
   }
   jsonResponse(response, status, formatJsonError(type, message, requestId));
+}
+
+function redactPayload(value, key = '') {
+  if (/authorization|api[_-]?key|token|secret|password|cookie/i.test(key)) return '[REDACTED]';
+  if (Array.isArray(value)) return value.map((item) => redactPayload(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, redactPayload(childValue, childKey)]));
+  }
+  return value;
+}
+
+function payloadPreview(value, maxBytes) {
+  let normalized = value;
+  if (typeof value === 'string') {
+    try {
+      normalized = JSON.parse(value);
+    } catch {
+      normalized = value
+        .replace(/(Bearer\s+)[^\s"']+/gi, '$1[REDACTED]')
+        .replace(/((?:api[_-]?key|token|secret|password|cookie)\s*[=:]\s*)[^,\s]+/gi, '$1[REDACTED]');
+    }
+  }
+  const serialized = JSON.stringify(redactPayload(normalized));
+  const buffer = Buffer.from(serialized, 'utf8');
+  if (buffer.length <= maxBytes) return serialized;
+  return `${buffer.subarray(0, maxBytes).toString('utf8')}...[truncated:${buffer.length - maxBytes}B]`;
+}
+
+function toolLogEntries(toolCalls, config, includePayload) {
+  return (toolCalls || []).map((tool) => {
+    const name = tool.name || tool.function?.name || 'unknown';
+    const id = tool.id || tool.call_id || null;
+    const rawArguments = tool.arguments ?? tool.function?.arguments ?? tool.parsedArguments ?? null;
+    const argumentBytes = typeof rawArguments === 'string'
+      ? Buffer.byteLength(rawArguments, 'utf8')
+      : Buffer.byteLength(JSON.stringify(rawArguments ?? {}), 'utf8');
+    return {
+      name,
+      id,
+      argumentBytes,
+      ...(includePayload ? { argumentPreview: payloadPreview(rawArguments, config.logToolPayloadMaxBytes) } : {}),
+    };
+  });
 }
 
 export function createProtocolProxyRuntime({
@@ -127,6 +206,10 @@ export function createProtocolProxyRuntime({
   const metrics = createMetrics();
   const rootLogger = createLogger(config, logSink);
   const budget = new BufferBudget(config.maxTotalBufferedBytes);
+  const correlations = new ToolCallCorrelationRegistry({
+    ttlMs: config.toolCorrelationTtlMs,
+    maxEntries: config.toolCorrelationMaxEntries,
+  });
   let draining = false;
 
   const handle = async (request, response) => {
@@ -149,21 +232,34 @@ export function createProtocolProxyRuntime({
     if (metrics.activeRequests >= config.maxActiveRequests) return jsonResponse(response, 429, formatJsonError('too_many_requests', 'active request limit reached', null));
 
     const requestId = randomUUID();
-    const requestStartedAt = Date.now();
+    const requestStartedAtMono = performance.now();
+    const elapsedMs = () => Math.max(0, Math.round(performance.now() - requestStartedAtMono));
     const requestLogger = rootLogger.child({ service: name, requestId, protocol: metricPrefix, path, method: request.method });
+    let terminalEvent = null;
+    const terminal = (event, fields = {}, level = 'info') => {
+      if (terminalEvent) return false;
+      terminalEvent = event;
+      requestLogger[level](event, { ...fields, elapsedMs: fields.elapsedMs ?? elapsedMs() });
+      return true;
+    };
+    const rejectRequest = (status, type, message, extraHeaders = {}) => {
+      terminal('request_rejected', { status, reason: type }, 'warn');
+      return jsonResponse(response, status, formatJsonError(type, message, requestId), extraHeaders);
+    };
+
     requestLogger.info('request_started', { guarded: guardedRoutes.has(path) });
     metrics.requestsTotal += 1;
     metrics.activeRequests += 1;
     const clientController = new AbortController();
     const onAbort = () => {
       if (!clientController.signal.aborted) {
-        requestLogger.warn('client_cancelled', { elapsedMs: Date.now() - requestStartedAt });
+        requestLogger.warn('client_disconnect_detected', { elapsedMs: elapsedMs() });
         metrics.clientCancellationsTotal += 1;
         clientController.abort('client_cancelled');
       }
     };
     request.once('aborted', onAbort);
-    response.once('close', () => { if (!response.writableEnded) onAbort(); });
+    response.once('close', () => { if (!response.writableFinished) onAbort(); });
 
     try {
       if (!guardedRoutes.has(path)) {
@@ -179,53 +275,79 @@ export function createProtocolProxyRuntime({
         });
         response.writeHead(upstream.status, copyResponseHeaders(upstream.headers));
         await writeNodeResponseBody(response, upstream.body);
-        response.end();
-        requestLogger.info('request_completed', { mode: 'passthrough', status: upstream.status, elapsedMs: Date.now() - requestStartedAt });
+        await endResponseAndWait(response);
+        terminal('request_completed', { mode: 'passthrough', status: upstream.status });
         return;
       }
 
-      if (request.method !== 'POST') return jsonResponse(response, 405, formatJsonError('method_not_allowed', 'guarded endpoint requires POST', requestId), { allow: 'POST' });
+      if (request.method !== 'POST') return rejectRequest(405, 'method_not_allowed', 'guarded endpoint requires POST', { allow: 'POST' });
       const route = guardedRoutes.get(path);
       let rawRequest;
       try {
         rawRequest = await readRequestBody(request, config.maxRequestBodyBytes);
       } catch (error) {
-        return jsonResponse(response, 413, formatJsonError(error.code || 'request_body_limit', error.message, requestId));
+        return rejectRequest(413, error.code || 'request_body_limit', error.message);
       }
       let originalBody;
       try {
         originalBody = JSON.parse(rawRequest.toString('utf8'));
       } catch {
-        return jsonResponse(response, 400, formatJsonError('invalid_request_json', 'request body must be valid JSON', requestId));
+        return rejectRequest(400, 'invalid_request_json', 'request body must be valid JSON');
       }
+
       const toolResults = summarizeToolResults(originalBody);
-      if (toolResults.length > 0) requestLogger.info('tool_results_received', { count: toolResults.length, results: toolResults });
+      if (toolResults.length > 0) {
+        const matches = correlations.resolve(toolResults);
+        const parentRequestIds = [...new Set(matches.map((match) => match.parentRequestId))];
+        const toolCallIds = toolResults.map((result) => result.id).filter(Boolean);
+        requestLogger.info('tool_results_received', {
+          count: toolResults.length,
+          toolCallIds,
+          parentRequestIds,
+          toolRoundTripMs: matches.length > 0 ? Math.max(...matches.map((match) => match.roundTripMs)) : null,
+          correlatedCount: matches.length,
+        });
+        if (config.logToolPayloads && requestLogger.isEnabled('trace')) {
+          requestLogger.trace('tool_results_payload', { preview: payloadPreview(toolResults, config.logToolPayloadMaxBytes) });
+        }
+      }
+
       let firstBody;
       try {
         firstBody = route.prepareRequest(originalBody, { recovery: false, config });
       } catch (error) {
-        return jsonResponse(response, 400, formatJsonError('invalid_request', error instanceof Error ? error.message : String(error), requestId));
+        return rejectRequest(400, 'invalid_request', error instanceof Error ? error.message : String(error));
       }
       const streaming = Boolean(firstBody.stream);
       const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
-      let lastTransportWarningAt = 0;
-      let lastSemanticWarningAt = 0;
-      const makeObserver = (attemptNumber, phase) => ({
-        onChunk(snapshot) { requestLogger.trace('upstream_chunk', { ...snapshot, phase }); },
-        onProgress(snapshot) {
-          const progress = { ...snapshot, phase, state: snapshot.state };
-          requestLogger.debug('request_progress', progress);
-          const now = Date.now();
-          if (snapshot.lastUpstreamActivityMs >= config.progressStallWarningMs && now - lastTransportWarningAt >= config.progressStallWarningMs) {
-            lastTransportWarningAt = now;
-            requestLogger.warn('transport_stall', progress);
-          }
-          if (snapshot.lastSemanticActivityMs >= config.progressStallWarningMs && now - lastSemanticWarningAt >= config.progressStallWarningMs) {
-            lastSemanticWarningAt = now;
-            requestLogger.warn('semantic_stall', progress);
-          }
-        },
-      });
+      let lastTransportWarningAtMono = 0;
+      let lastSemanticWarningAtMono = 0;
+      const debugEnabled = requestLogger.isEnabled('debug');
+      const traceEnabled = requestLogger.isEnabled('trace');
+      const warnEnabled = requestLogger.isEnabled('warn');
+      const makeObserver = (attemptNumber, phase) => {
+        if (!debugEnabled && !traceEnabled && !warnEnabled) return null;
+        return {
+          ...(traceEnabled ? { onChunk(snapshot) { requestLogger.trace('upstream_chunk', { ...snapshot, phase }); } } : {}),
+          ...(debugEnabled ? { onState(snapshot) { requestLogger.debug('request_state_changed', { ...snapshot, phase }); } } : {}),
+          ...((debugEnabled || warnEnabled) ? {
+            onProgress(snapshot) {
+              const progress = { ...snapshot, phase };
+              if (debugEnabled) requestLogger.debug('request_progress', progress);
+              if (!warnEnabled) return;
+              const now = performance.now();
+              if (snapshot.lastUpstreamActivityMs >= config.progressStallWarningMs && now - lastTransportWarningAtMono >= config.progressStallWarningMs) {
+                lastTransportWarningAtMono = now;
+                requestLogger.warn('transport_stall', progress);
+              }
+              if (snapshot.lastSemanticActivityMs >= config.progressStallWarningMs && now - lastSemanticWarningAtMono >= config.progressStallWarningMs) {
+                lastSemanticWarningAtMono = now;
+                requestLogger.warn('semantic_stall', progress);
+              }
+            },
+          } : {}),
+        };
+      };
       const attemptArgs = {
         fetchImpl,
         url: `${config.vllmBaseUrl}${parsedUrl.pathname}${parsedUrl.search}`,
@@ -246,11 +368,7 @@ export function createProtocolProxyRuntime({
         attemptNumber: 1,
       });
       if (attempt.kind === 'success' && route.validateAttempt) {
-        const semanticValidation = route.validateAttempt(attempt, {
-          originalBody,
-          firstBody,
-          config,
-        });
+        const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody, config });
         if (!semanticValidation.ok) {
           attempt = {
             ...attempt,
@@ -267,7 +385,10 @@ export function createProtocolProxyRuntime({
         requestLogger.warn('loop_detected', { reason: attempt.loopInfo.reason, attempt: 1 });
       }
       if (attempt.kind === 'interrupted') metrics.upstreamInterruptionsTotal += 1;
-      if (attempt.kind === 'cancelled') return;
+      if (attempt.kind === 'cancelled') {
+        terminal('request_cancelled', { reason: attempt.reason || 'client_cancelled' }, 'warn');
+        return;
+      }
 
       if (attempt.kind !== 'success' && config.maxRecoveryAttempts > 0 && recoverable(attempt)) {
         metrics.recoveriesTotal += 1;
@@ -285,6 +406,7 @@ export function createProtocolProxyRuntime({
           recovery = route.buildRecovery({ originalBody, firstBody, reason, config });
         } catch (error) {
           heartbeat?.stop();
+          terminal('request_failed', { kind: 'recovery_build_failed', reason: error instanceof Error ? error.message : String(error) }, 'error');
           return sendGuardedFailure({ response, route, streaming, status: 502, type: 'recovery_build_failed', message: error instanceof Error ? error.message : String(error), requestId, formatJsonError });
         }
         attempt = await performBufferedAttempt({
@@ -295,12 +417,7 @@ export function createProtocolProxyRuntime({
           attemptNumber: 2,
         });
         if (attempt.kind === 'success' && route.validateAttempt) {
-          const semanticValidation = route.validateAttempt(attempt, {
-            originalBody,
-            firstBody: recovery.body,
-            config,
-            recovery: true,
-          });
+          const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody: recovery.body, config, recovery: true });
           if (!semanticValidation.ok) {
             attempt = {
               ...attempt,
@@ -318,7 +435,7 @@ export function createProtocolProxyRuntime({
         }
         if (attempt.kind === 'success') {
           metrics.recoverySuccessTotal += 1;
-          requestLogger.info('recovery_completed', { elapsedMs: Date.now() - requestStartedAt });
+          requestLogger.info('recovery_completed', { elapsedMs: elapsedMs() });
         }
       }
 
@@ -326,26 +443,50 @@ export function createProtocolProxyRuntime({
       if (attempt.kind === 'success') {
         const output = route.adapter.extractOutput?.(attempt.result) || { toolCalls: [], finalText: '' };
         const toolCalls = Array.isArray(output.toolCalls) ? output.toolCalls : [];
+        const includePayload = config.logToolPayloads && requestLogger.isEnabled('trace');
         if (toolCalls.length > 0) {
-          requestLogger.info('tool_calls_generated', {
+          const tools = toolLogEntries(toolCalls, config, false);
+          requestLogger.info('tool_calls_ready', { count: toolCalls.length, tools });
+          if (debugEnabled) requestLogger.debug('tool_calls_generated', { count: toolCalls.length, tools });
+          if (includePayload) requestLogger.trace('tool_calls_payload', { tools: toolLogEntries(toolCalls, config, true) });
+        }
+
+        const replayStartedAtMono = performance.now();
+        const replayLevel = toolCalls.length > 0 ? 'info' : 'debug';
+        if (debugEnabled) requestLogger.debug('request_state_changed', { state: 'response_replaying', phase: 'delivery' });
+        requestLogger[replayLevel]('response_replay_started', { bytes: attempt.rawBody?.length || 0, toolCallCount: toolCalls.length });
+        try {
+          await sendBufferedSuccess(response, attempt);
+        } catch (error) {
+          metrics.responseReplayInterruptionsTotal += 1;
+          terminal('request_failed', { kind: 'response_replay_interrupted', reason: error instanceof Error ? error.message : String(error) }, 'error');
+          return;
+        }
+        const replayDurationMs = Math.max(0, Math.round(performance.now() - replayStartedAtMono));
+        requestLogger[replayLevel]('response_replay_completed', { bytes: attempt.rawBody?.length || 0, replayDurationMs });
+        if (toolCalls.length > 0) {
+          correlations.register(requestId, toolCalls);
+          requestLogger.info('tool_calls_delivered', {
             count: toolCalls.length,
-            tools: toolCalls.map((tool) => ({ name: tool.name || tool.function?.name || 'unknown', id: tool.id || null })),
+            tools: toolLogEntries(toolCalls, config, false),
           });
         }
-        await sendBufferedSuccess(response, attempt);
-        requestLogger.info('request_completed', {
+        terminal('request_completed', {
           mode: 'guarded',
           status: attempt.status || 200,
-          elapsedMs: Date.now() - requestStartedAt,
           upstreamBytes: attempt.rawBody?.length || 0,
           toolCallCount: toolCalls.length,
           finalTextChars: typeof output.finalText === 'string' ? output.finalText.length : 0,
+          replayDurationMs,
         });
         return;
       }
-      if (attempt.kind === 'cancelled') return;
+      if (attempt.kind === 'cancelled') {
+        terminal('request_cancelled', { reason: attempt.reason || 'client_cancelled' }, 'warn');
+        return;
+      }
       metrics.validationFailuresTotal += 1;
-      requestLogger.error('request_failed', { kind: attempt.kind, reason: attempt.reason || attempt.loopInfo?.reason || 'unknown', elapsedMs: Date.now() - requestStartedAt });
+      terminal('request_failed', { kind: attempt.kind, reason: attempt.reason || attempt.loopInfo?.reason || 'unknown' }, 'error');
       const status = attempt.kind === 'http_error' && attempt.status < 500 ? attempt.status : 502;
       return sendGuardedFailure({
         response,
@@ -358,11 +499,15 @@ export function createProtocolProxyRuntime({
         formatJsonError,
       });
     } catch (error) {
-      requestLogger.error('proxy_error', { message: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - requestStartedAt });
+      terminal('request_failed', { kind: 'proxy_error', reason: error instanceof Error ? error.message : String(error) }, 'error');
       if (!clientController.signal.aborted) {
         jsonResponse(response, 502, formatJsonError('proxy_error', error instanceof Error ? error.message : String(error), requestId));
       }
     } finally {
+      if (!terminalEvent) {
+        if (clientController.signal.aborted) terminal('request_cancelled', { reason: clientController.signal.reason || 'client_cancelled' }, 'warn');
+        else terminal('request_failed', { kind: 'non_terminal_exit', reason: 'request exited without terminal state' }, 'error');
+      }
       budget.release(requestId);
       metrics.activeRequests = Math.max(0, metrics.activeRequests - 1);
       request.removeListener('aborted', onAbort);

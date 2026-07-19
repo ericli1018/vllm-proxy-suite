@@ -1,7 +1,8 @@
+import { classifyJsonParseError } from '../core/json-diagnostics.js';
 import { SseFrameDecoder, encodeSseData } from '../core/sse.js';
 
-function invalid(reason, detail = reason) {
-  return { ok: false, reason, detail };
+function invalid(reason, detail = reason, extra = {}) {
+  return { ok: false, reason, detail, ...extra };
 }
 
 function createChoice(index) {
@@ -11,6 +12,7 @@ function createChoice(index) {
     reasoning: '',
     finishReason: null,
     toolCalls: new Map(),
+    lastToolCallIndex: null,
   };
 }
 
@@ -23,6 +25,11 @@ function createToolCall(index) {
     arguments: '',
     parsedArguments: null,
     argumentError: null,
+    argumentErrorDiagnostics: null,
+    nameFragmentCount: 0,
+    argumentFragmentCount: 0,
+    nameBytes: 0,
+    argumentBytes: 0,
   };
 }
 
@@ -37,24 +44,52 @@ function contentDeltaText(value) {
   return '';
 }
 
+function nextToolCallIndex(choice) {
+  if (choice.toolCalls.size === 0) return 0;
+  return Math.max(...choice.toolCalls.keys()) + 1;
+}
+
+function resolveToolCallIndex(choice, delta, position, deltaCount) {
+  if (Number.isInteger(delta?.index)) return delta.index;
+  if (typeof delta?.id === 'string') {
+    for (const [index, tool] of choice.toolCalls.entries()) {
+      if (tool.id === delta.id) return index;
+    }
+    return nextToolCallIndex(choice);
+  }
+  if (deltaCount === 1 && choice.lastToolCallIndex !== null && choice.toolCalls.has(choice.lastToolCallIndex)) {
+    return choice.lastToolCallIndex;
+  }
+  const existingIndexes = [...choice.toolCalls.keys()].sort((a, b) => a - b);
+  if (position < existingIndexes.length) return existingIndexes[position];
+  return nextToolCallIndex(choice);
+}
+
 function absorbToolCalls(choice, toolCalls) {
   let toolNameBytes = 0;
   let toolArgumentBytes = 0;
   if (!Array.isArray(toolCalls)) return { toolNameBytes, toolArgumentBytes };
-  for (const delta of toolCalls) {
-    const index = Number.isInteger(delta?.index) ? delta.index : choice.toolCalls.size;
+  for (const [position, delta] of toolCalls.entries()) {
+    const index = resolveToolCallIndex(choice, delta, position, toolCalls.length);
     const tool = choice.toolCalls.get(index) || createToolCall(index);
     if (typeof delta?.id === 'string') tool.id = delta.id;
     if (typeof delta?.type === 'string') tool.type = delta.type;
     if (typeof delta?.function?.name === 'string') {
+      const nameBytes = Buffer.byteLength(delta.function.name, 'utf8');
       tool.name += delta.function.name;
-      toolNameBytes += Buffer.byteLength(delta.function.name, 'utf8');
+      tool.nameFragmentCount += 1;
+      tool.nameBytes += nameBytes;
+      toolNameBytes += nameBytes;
     }
     if (typeof delta?.function?.arguments === 'string') {
+      const argumentBytes = Buffer.byteLength(delta.function.arguments, 'utf8');
       tool.arguments += delta.function.arguments;
-      toolArgumentBytes += Buffer.byteLength(delta.function.arguments, 'utf8');
+      tool.argumentFragmentCount += 1;
+      tool.argumentBytes += argumentBytes;
+      toolArgumentBytes += argumentBytes;
     }
     choice.toolCalls.set(index, tool);
+    choice.lastToolCallIndex = index;
   }
   return { toolNameBytes, toolArgumentBytes };
 }
@@ -65,12 +100,44 @@ function finalizeTools(choices) {
       try {
         tool.parsedArguments = JSON.parse(tool.arguments || '{}');
         tool.argumentError = null;
+        tool.argumentErrorDiagnostics = null;
       } catch (error) {
         tool.parsedArguments = null;
         tool.argumentError = error instanceof Error ? error.message : String(error);
+        tool.argumentErrorDiagnostics = classifyJsonParseError(error);
       }
     }
   }
+}
+
+function collectToolDiagnostics(choices) {
+  const toolCalls = [];
+  for (const [choiceIndex, choice] of choices.entries()) {
+    for (const [toolIndex, tool] of choice.toolCalls.entries()) {
+      toolCalls.push({
+        key: `choice:${choiceIndex}/tool:${toolIndex}`,
+        choiceIndex,
+        index: toolIndex,
+        id: tool.id || null,
+        name: tool.name || 'unknown',
+        argumentBytes: tool.argumentBytes || 0,
+        argumentFragments: tool.argumentFragmentCount || 0,
+        nameFragments: tool.nameFragmentCount || 0,
+      });
+    }
+  }
+  toolCalls.sort((a, b) => a.choiceIndex - b.choiceIndex || a.index - b.index);
+  return {
+    toolCallCount: toolCalls.length,
+    toolCallIndexes: [...new Set(toolCalls.map((tool) => tool.index))],
+    toolCallKeys: toolCalls.map((tool) => tool.key),
+    toolCallIds: toolCalls.map((tool) => tool.id).filter(Boolean),
+    toolNames: toolCalls.map((tool) => tool.name),
+    toolArgumentBytesByCall: Object.fromEntries(toolCalls.map((tool) => [tool.key, tool.argumentBytes])),
+    toolArgumentFragmentsByCall: Object.fromEntries(toolCalls.map((tool) => [tool.key, tool.argumentFragments])),
+    parallelToolCallsDetected: toolCalls.length > 1,
+    toolCalls,
+  };
 }
 
 class ChatCompletionsStreamParser {
@@ -152,6 +219,7 @@ class ChatCompletionsStreamParser {
         toolNameBytes: this.toolNameBytes,
         toolArgumentBytes: this.toolArgumentBytes,
         semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
+        ...collectToolDiagnostics(this.choices),
       },
     };
   }
@@ -163,23 +231,47 @@ class ChatCompletionsStreamParser {
   }
 }
 
+function malformedToolDiagnostics(choices, choiceIndex, toolIndex, tool) {
+  const aggregate = collectToolDiagnostics(choices);
+  return {
+    ...aggregate,
+    toolCallKey: `choice:${choiceIndex}/tool:${toolIndex}`,
+    toolCallIndex: toolIndex,
+    toolCallId: tool.id || null,
+    toolName: tool.name || 'unknown',
+    toolArgumentBytes: tool.argumentBytes || 0,
+    toolArgumentFragments: tool.argumentFragmentCount || 0,
+    ...tool.argumentErrorDiagnostics,
+  };
+}
+
 function validateChoices(choices, config) {
   if (!(choices instanceof Map) || choices.size === 0) return invalid('missing_choices');
   let toolCount = 0;
   let hasOutput = false;
-  for (const choice of choices.values()) {
+  for (const [choiceIndex, choice] of choices.entries()) {
     if (choice.content?.trim()) hasOutput = true;
     if (choice.toolCalls.size > 0) hasOutput = true;
     toolCount += choice.toolCalls.size;
     if (choice.toolCalls.size > 0 && choice.finishReason !== 'tool_calls') return invalid('tool_finish_reason_mismatch');
-    for (const tool of choice.toolCalls.values()) {
+    for (const [toolIndex, tool] of choice.toolCalls.entries()) {
       if (!tool.name) return invalid('missing_tool_name');
-      if (Buffer.byteLength(tool.arguments || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit');
-      if (tool.argumentError) return invalid('malformed_tool_arguments', tool.argumentError);
-      if (!tool.parsedArguments || typeof tool.parsedArguments !== 'object' || Array.isArray(tool.parsedArguments)) return invalid('invalid_tool_arguments');
+      if (Buffer.byteLength(tool.arguments || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit', 'tool_argument_limit', { retryable: false, diagnostics: malformedToolDiagnostics(choices, choiceIndex, toolIndex, tool) });
+      if (tool.argumentError) {
+        return invalid('malformed_tool_arguments', tool.argumentError, {
+          retryable: false,
+          diagnostics: malformedToolDiagnostics(choices, choiceIndex, toolIndex, tool),
+        });
+      }
+      if (!tool.parsedArguments || typeof tool.parsedArguments !== 'object' || Array.isArray(tool.parsedArguments)) {
+        return invalid('invalid_tool_arguments', 'invalid_tool_arguments', {
+          retryable: false,
+          diagnostics: malformedToolDiagnostics(choices, choiceIndex, toolIndex, tool),
+        });
+      }
     }
   }
-  if (toolCount > config.maxToolCalls) return invalid('too_many_tool_calls');
+  if (toolCount > config.maxToolCalls) return invalid('too_many_tool_calls', 'too_many_tool_calls', { retryable: false, diagnostics: collectToolDiagnostics(choices) });
   if (!hasOutput) return invalid('reasoning_without_output');
   return { ok: true };
 }
@@ -231,16 +323,22 @@ export const chatCompletionsAdapter = Object.freeze({
       toolArgumentBytes,
       semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
       sseEvents: (result.chunkCount || 0) + (result.done ? 1 : 0),
+      ...collectToolDiagnostics(result.choices),
     };
   },
   semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
   validateIncremental(result, config) {
     if (result.error) return invalid('upstream_sse_error', result.error.message || 'upstream error');
     if (result.structuralErrors.length) return invalid(result.structuralErrors[0]);
-    for (const choice of result.choices.values()) {
+    for (const [choiceIndex, choice] of result.choices.entries()) {
       if (Buffer.byteLength(choice.reasoning || '', 'utf8') > config.maxReasoningBytes) return invalid('reasoning_buffer_limit');
-      for (const tool of choice.toolCalls.values()) {
-        if (Buffer.byteLength(tool.arguments || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit');
+      for (const [toolIndex, tool] of choice.toolCalls.entries()) {
+        if (Buffer.byteLength(tool.arguments || '', 'utf8') > config.maxToolArgumentBytes) {
+          return invalid('tool_argument_limit', 'tool_argument_limit', {
+            retryable: false,
+            diagnostics: malformedToolDiagnostics(result.choices, choiceIndex, toolIndex, tool),
+          });
+        }
       }
     }
     return { ok: true };

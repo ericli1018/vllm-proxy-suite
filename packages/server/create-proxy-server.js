@@ -69,8 +69,16 @@ function summarizeToolResults(body) {
 }
 
 function recoverable(attempt) {
+  if (attempt?.retryable === false) return false;
   if (attempt.kind === 'loop' || attempt.kind === 'invalid' || attempt.kind === 'interrupted') return true;
   return attempt.kind === 'http_error' && attempt.status >= 500;
+}
+
+function attemptFailureFields(attempt) {
+  const diagnostics = attempt?.diagnostics && typeof attempt.diagnostics === 'object'
+    ? attempt.diagnostics
+    : {};
+  return { retryable: recoverable(attempt), ...diagnostics };
 }
 
 function errorMessage(attempt) {
@@ -133,8 +141,8 @@ async function sendBufferedSuccess(response, attempt) {
   return endResponseAndWait(response, attempt.rawBody);
 }
 
-async function sendGuardedFailure({ response, route, streaming, status, type, message, requestId, formatJsonError }) {
-  const error = { message, type, param: null, code: type, request_id: requestId };
+async function sendGuardedFailure({ response, route, streaming, status, type, message, requestId, formatJsonError, extra = {} }) {
+  const error = { message, type, param: null, code: type, request_id: requestId, ...extra };
   if (streaming) {
     if (!response.headersSent) {
       response.writeHead(status, {
@@ -146,7 +154,7 @@ async function sendGuardedFailure({ response, route, streaming, status, type, me
     await endResponseAndWait(response, route.adapter.streamError(error)).catch(() => {});
     return;
   }
-  jsonResponse(response, status, formatJsonError(type, message, requestId));
+  jsonResponse(response, status, formatJsonError(type, message, requestId, extra));
 }
 
 function redactPayload(value, key = '') {
@@ -392,7 +400,11 @@ export function createProtocolProxyRuntime({
 
       if (attempt.kind !== 'success' && config.maxRecoveryAttempts > 0 && recoverable(attempt)) {
         metrics.recoveriesTotal += 1;
-        requestLogger.info('recovery_started', { fromKind: attempt.kind, reason: attempt.loopInfo?.reason || attempt.reason || 'attempt_failed' });
+        requestLogger.info('recovery_started', {
+          fromKind: attempt.kind,
+          reason: attempt.loopInfo?.reason || attempt.reason || 'attempt_failed',
+          ...attemptFailureFields(attempt),
+        });
         budget.release(requestId);
         const reason = {
           ok: false,
@@ -400,6 +412,8 @@ export function createProtocolProxyRuntime({
           reason: attempt.loopInfo?.reason || attempt.reason || 'attempt_failed',
           detail: attempt.detail,
           context: attempt.context,
+          retryable: attempt.retryable,
+          diagnostics: attempt.diagnostics,
         };
         let recovery;
         try {
@@ -486,7 +500,12 @@ export function createProtocolProxyRuntime({
         return;
       }
       metrics.validationFailuresTotal += 1;
-      terminal('request_failed', { kind: attempt.kind, reason: attempt.reason || attempt.loopInfo?.reason || 'unknown' }, 'error');
+      const failureFields = attemptFailureFields(attempt);
+      terminal('request_failed', {
+        kind: attempt.kind,
+        reason: attempt.reason || attempt.loopInfo?.reason || 'unknown',
+        ...failureFields,
+      }, 'error');
       const status = attempt.kind === 'http_error' && attempt.status < 500 ? attempt.status : 502;
       return sendGuardedFailure({
         response,
@@ -497,6 +516,7 @@ export function createProtocolProxyRuntime({
         message: errorMessage(attempt),
         requestId,
         formatJsonError,
+        extra: failureFields,
       });
     } catch (error) {
       terminal('request_failed', { kind: 'proxy_error', reason: error instanceof Error ? error.message : String(error) }, 'error');

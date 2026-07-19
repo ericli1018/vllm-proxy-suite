@@ -39,6 +39,15 @@ function emptySemanticMetrics() {
     toolArgumentBytes: 0,
     semanticBytes: 0,
     sseEvents: 0,
+    toolCallCount: 0,
+    toolCallIndexes: [],
+    toolCallKeys: [],
+    toolCallIds: [],
+    toolNames: [],
+    toolArgumentBytesByCall: {},
+    toolArgumentFragmentsByCall: {},
+    parallelToolCallsDetected: false,
+    toolCalls: [],
   };
 }
 
@@ -122,6 +131,14 @@ export async function performBufferedAttempt({
       toolArgumentBytes: semantic.toolArgumentBytes,
       semanticBytes: semantic.semanticBytes,
       semanticProgress: semantic.semanticBytes,
+      toolCallCount: semantic.toolCallCount,
+      toolCallIndexes: semantic.toolCallIndexes,
+      toolCallKeys: semantic.toolCallKeys,
+      toolCallIds: semantic.toolCallIds,
+      toolNames: semantic.toolNames,
+      toolArgumentBytesByCall: semantic.toolArgumentBytesByCall,
+      toolArgumentFragmentsByCall: semantic.toolArgumentFragmentsByCall,
+      parallelToolCallsDetected: semantic.parallelToolCallsDetected,
       rawBufferedBytes,
       bufferedBytes: rawBufferedBytes,
       parsedSemanticBytes: semantic.semanticBytes,
@@ -280,6 +297,10 @@ export async function performBufferedAttempt({
         upstreamChunks,
         sseEvents: semantic.sseEvents,
         semanticBytes: semantic.semanticBytes,
+        toolCallCount: semantic.toolCallCount,
+        toolCallIndexes: semantic.toolCallIndexes,
+        toolNames: semantic.toolNames,
+        parallelToolCallsDetected: semantic.parallelToolCallsDetected,
       });
       if (semantic.semanticBytes !== lastSemanticBytes) {
         lastSemanticBytes = semantic.semanticBytes;

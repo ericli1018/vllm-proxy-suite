@@ -364,7 +364,7 @@ TOOL_CORRELATION_MAX_ENTRIES: "10000"
 Example debug record:
 
 ```text
-2026-07-19T00:00:00.000Z [debug] event=request_progress service="vllm-openai-proxy" requestId="..." phase="initial" attempt=1 state="upstream_streaming" elapsedMs=40000 upstreamBytes=18240 averageBytesPerSec=456 streamAverageBytesPerSec=612 recentBytesPerSec=590 upstreamChunks=93 sseEvents=147 reasoningBytes=7412 contentBytes=0 toolNameBytes=4 toolArgumentBytes=128 semanticBytes=7544 rawBufferedBytes=18240 estimatedRequestMemoryBytes=25784 globalBufferedBytes=18240 lastUpstreamActivityMs=183 lastSemanticActivityMs=183 timeToHeadersMs=12 timeToFirstByteMs=845 timeToFirstSemanticMs=901
+2026-07-19T00:00:00.000Z [debug] event=request_progress service="vllm-openai-proxy" requestId="..." phase="initial" attempt=1 state="upstream_streaming" elapsedMs=40000 upstreamBytes=18240 averageBytesPerSec=456 streamAverageBytesPerSec=612 recentBytesPerSec=590 upstreamChunks=93 sseEvents=147 reasoningBytes=7412 contentBytes=0 toolNameBytes=4 toolArgumentBytes=128 semanticBytes=7544 toolCallCount=1 toolCallIndexes=[0] toolNames=["Read"] toolArgumentBytesByCall={"choice:0/tool:0":128} toolArgumentFragmentsByCall={"choice:0/tool:0":6} parallelToolCallsDetected=false rawBufferedBytes=18240 estimatedRequestMemoryBytes=25784 globalBufferedBytes=18240 lastUpstreamActivityMs=183 lastSemanticActivityMs=183 timeToHeadersMs=12 timeToFirstByteMs=845 timeToFirstSemanticMs=901
 ```
 
 The counters have distinct meanings:
@@ -372,6 +372,8 @@ The counters have distinct meanings:
 - `upstreamChunks`: calls to the upstream stream reader. This is transport chunking, not an SSE frame count.
 - `sseEvents`: complete protocol events parsed by the active adapter.
 - `semanticBytes`: UTF-8 bytes from reasoning, content, tool names and fragmented tool arguments only. Metadata, role-only chunks, usage, ping, completion markers and `[DONE]` do not increment it.
+- `toolCallCount`: current distinct Tool Calls, not Tool argument fragment count. `toolArgumentFragmentsByCall` reports the fragment count separately.
+- `parallelToolCallsDetected`: `true` when the current assistant response contains more than one Tool Call.
 - `lastUpstreamActivityMs`: time since any upstream bytes arrived.
 - `lastSemanticActivityMs`: time since actual semantic bytes increased.
 - `rawBufferedBytes`: raw upstream bytes retained for Protected Streaming.
@@ -402,6 +404,8 @@ tool_results_received parentRequestIds=[...]
 ```
 
 `tool_calls_delivered` means Node emitted `finish` for the protected response replay. It confirms that the response bytes were handed to the outgoing stream, but it is not an application-level acknowledgement from Hermes. `tool_results_received` is the stronger evidence that Hermes parsed the call, executed the tool, and submitted the next request. Tool-call correlation is bounded by `TOOL_CORRELATION_TTL_MS` and `TOOL_CORRELATION_MAX_ENTRIES`.
+
+Malformed Tool JSON errors include payload-safe parse diagnostics and `retryable:false`. Generic Proxy Recovery is skipped for malformed, invalid, oversized, or excessive Tool structures so that the same deterministic failure is not regenerated inside the Proxy.
 
 Every logged `request_started` terminates with exactly one of:
 

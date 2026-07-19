@@ -77,9 +77,9 @@ function anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true
       createAnthropicGuardedRoute(config),
     ]]),
     allowPassthrough: (path) => path === '/v1/messages/count_tokens',
-    formatJsonError: (type, message, requestId) => ({
+    formatJsonError: (type, message, requestId, extra = {}) => ({
       type: 'error',
-      error: { type, message },
+      error: { type, message, ...extra },
       ...(requestId ? { request_id: requestId } : {}),
     }),
   };

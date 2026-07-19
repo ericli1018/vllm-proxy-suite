@@ -69,13 +69,14 @@ function openAiRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true })
       ['/v1/responses', createRoute(responsesAdapter, 'responses', config)],
     ]),
     allowPassthrough: (path) => isOpenAiPassthroughPath(path),
-    formatJsonError: (type, message, requestId) => ({
+    formatJsonError: (type, message, requestId, extra = {}) => ({
       error: {
         message,
         type,
         param: null,
         code: type,
         ...(requestId ? { request_id: requestId } : {}),
+        ...extra,
       },
     }),
   };

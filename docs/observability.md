@@ -42,8 +42,23 @@ semanticBytes unchanged
 
 ```text
 toolArgumentBytes increasing
-→ the model is still assembling a Tool Call; this is semantic activity
+→ the model is still assembling Tool Call arguments; this is semantic activity
 ```
+
+Tool diagnostics in `debug` progress:
+
+```text
+toolCallCount
+toolCallIndexes
+toolCallKeys
+toolCallIds
+toolNames
+toolArgumentBytesByCall
+toolArgumentFragmentsByCall
+parallelToolCallsDetected
+```
+
+For Chat Completions, a continuation fragment that omits `index` is attached to the active Tool Call instead of being counted as a new call. Per-call keys use `choice:<choice>/tool:<index>`. Responses use `output:<index>/call:<id>`, and Anthropic uses `block:<index>`.
 
 ## Hermes tool round-trip
 
@@ -85,3 +100,23 @@ LOG_TOOL_PAYLOADS=true
 ```
 
 The proxy emits a truncated preview and redacts common credential keys. This mode can still expose project data and should only be used for controlled debugging.
+
+## Malformed Tool argument diagnostics
+
+Deterministic Tool JSON failures are logged with `retryable:false` and safe fields such as:
+
+```text
+toolCallCount
+toolCallKey
+toolCallIndex
+toolCallId
+toolName
+toolArgumentBytes
+toolArgumentFragments
+parseErrorCategory
+parseErrorOffset
+parseErrorLine
+parseErrorColumn
+```
+
+The full Tool arguments are not included. `malformed_tool_arguments` and equivalent Anthropic/Responses failures bypass generic Proxy Recovery to avoid repeating the same invalid generation inside the Proxy.

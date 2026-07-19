@@ -1,3 +1,4 @@
+import { classifyJsonParseError } from '../core/json-diagnostics.js';
 import { SseFrameDecoder } from '../core/sse.js';
 
 const UNSUPPORTED_FIELDS = [
@@ -13,8 +14,8 @@ const UNSUPPORTED_FIELDS = [
   'seed',
 ];
 
-function invalid(reason, detail = reason) {
-  return { ok: false, reason, detail };
+function invalid(reason, detail = reason, extra = {}) {
+  return { ok: false, reason, detail, ...extra };
 }
 
 function isNumber(value, min, max) {
@@ -37,8 +38,47 @@ function createBlock(index, content = {}) {
     partialJson: '',
     input: content.input && typeof content.input === 'object' && !Array.isArray(content.input) ? structuredClone(content.input) : null,
     toolJsonError: null,
+    toolJsonErrorDiagnostics: null,
+    argumentFragmentCount: 0,
+    argumentBytes: content.input && typeof content.input === 'object' ? Buffer.byteLength(JSON.stringify(content.input), 'utf8') : 0,
     stopped: false,
     rawDeltas: [],
+  };
+}
+
+function collectToolBlockDiagnostics(blocks) {
+  const toolCalls = blocks.filter((block) => block.type === 'tool_use').map((block) => ({
+    key: `block:${block.index}`,
+    index: block.index,
+    id: block.id || null,
+    name: block.name || 'unknown',
+    argumentBytes: block.argumentBytes || 0,
+    argumentFragments: block.argumentFragmentCount || 0,
+    nameFragments: block.name ? 1 : 0,
+  })).sort((a, b) => a.index - b.index);
+  return {
+    toolCallCount: toolCalls.length,
+    toolCallIndexes: toolCalls.map((tool) => tool.index),
+    toolCallKeys: toolCalls.map((tool) => tool.key),
+    toolCallIds: toolCalls.map((tool) => tool.id).filter(Boolean),
+    toolNames: toolCalls.map((tool) => tool.name),
+    toolArgumentBytesByCall: Object.fromEntries(toolCalls.map((tool) => [tool.key, tool.argumentBytes])),
+    toolArgumentFragmentsByCall: Object.fromEntries(toolCalls.map((tool) => [tool.key, tool.argumentFragments])),
+    parallelToolCallsDetected: toolCalls.length > 1,
+    toolCalls,
+  };
+}
+
+function malformedBlockDiagnostics(blocks, block) {
+  return {
+    ...collectToolBlockDiagnostics(blocks),
+    toolCallKey: `block:${block.index}`,
+    toolCallIndex: block.index,
+    toolCallId: block.id || null,
+    toolName: block.name || 'unknown',
+    toolArgumentBytes: block.argumentBytes || 0,
+    toolArgumentFragments: block.argumentFragmentCount || 0,
+    ...block.toolJsonErrorDiagnostics,
   };
 }
 
@@ -118,8 +158,11 @@ class AnthropicMessagesStreamParser {
           block.text += delta.text;
           this.contentBytes += Buffer.byteLength(delta.text, 'utf8');
         } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+          const argumentBytes = Buffer.byteLength(delta.partial_json, 'utf8');
           block.partialJson += delta.partial_json;
-          this.toolArgumentBytes += Buffer.byteLength(delta.partial_json, 'utf8');
+          block.argumentFragmentCount += 1;
+          block.argumentBytes += argumentBytes;
+          this.toolArgumentBytes += argumentBytes;
         } else block.rawDeltas.push(structuredClone(payload));
         break;
       }
@@ -134,8 +177,11 @@ class AnthropicMessagesStreamParser {
           if (!block.partialJson && block.input) break;
           try {
             block.input = JSON.parse(block.partialJson || '{}');
+            block.toolJsonError = null;
+            block.toolJsonErrorDiagnostics = null;
           } catch (error) {
             block.toolJsonError = error instanceof Error ? error.message : String(error);
+            block.toolJsonErrorDiagnostics = classifyJsonParseError(error);
           }
         }
         break;
@@ -173,6 +219,7 @@ class AnthropicMessagesStreamParser {
         toolNameBytes: this.toolNameBytes,
         toolArgumentBytes: this.toolArgumentBytes,
         semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
+        ...collectToolBlockDiagnostics(this.blocks),
       },
     };
   }
@@ -203,12 +250,12 @@ function validateBlocks(result, config, requireTerminal) {
       tools += 1;
       hasOutput = true;
       if (!block.id || !block.name) return invalid('invalid_tool_identity');
-      if (Buffer.byteLength(block.partialJson || JSON.stringify(block.input || {}), 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit');
-      if (block.toolJsonError) return invalid('malformed_tool_json', block.toolJsonError);
-      if (!block.input || typeof block.input !== 'object' || Array.isArray(block.input)) return invalid('invalid_tool_input');
+      if (Buffer.byteLength(block.partialJson || JSON.stringify(block.input || {}), 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit', 'tool_argument_limit', { retryable: false, diagnostics: malformedBlockDiagnostics(result.blocks, block) });
+      if (block.toolJsonError) return invalid('malformed_tool_json', block.toolJsonError, { retryable: false, diagnostics: malformedBlockDiagnostics(result.blocks, block) });
+      if (!block.input || typeof block.input !== 'object' || Array.isArray(block.input)) return invalid('invalid_tool_input', 'invalid_tool_input', { retryable: false, diagnostics: malformedBlockDiagnostics(result.blocks, block) });
     }
   }
-  if (tools > config.maxToolCalls) return invalid('too_many_tool_calls');
+  if (tools > config.maxToolCalls) return invalid('too_many_tool_calls', 'too_many_tool_calls', { retryable: false, diagnostics: collectToolBlockDiagnostics(result.blocks) });
   if (requireTerminal && tools > 0 && result.stopReason !== 'tool_use') return invalid('tool_stop_reason_mismatch');
   if (!hasOutput) return invalid('thinking_without_output');
   return { ok: true };
@@ -222,6 +269,8 @@ function normalizeNonStream(payload) {
     if (block.type === 'tool_use') {
       block.input = content.input;
       block.partialJson = JSON.stringify(content.input || {});
+      block.argumentFragmentCount = block.partialJson ? 1 : 0;
+      block.argumentBytes = Buffer.byteLength(block.partialJson, 'utf8');
     }
     blocks.push(block);
   }
@@ -311,6 +360,7 @@ export const anthropicMessagesAdapter = Object.freeze({
       toolArgumentBytes,
       semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
       sseEvents: result.eventCount || 0,
+      ...collectToolBlockDiagnostics(result.blocks),
     };
   },
   semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
@@ -319,7 +369,7 @@ export const anthropicMessagesAdapter = Object.freeze({
     if (result.blocks.length > config.maxContentItems) return invalid('too_many_content_blocks');
     for (const block of result.blocks) {
       if (block.type === 'thinking' && Buffer.byteLength(block.thinking || '', 'utf8') > config.maxReasoningBytes) return invalid('thinking_buffer_limit');
-      if (block.type === 'tool_use' && Buffer.byteLength(block.partialJson || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit');
+      if (block.type === 'tool_use' && Buffer.byteLength(block.partialJson || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit', 'tool_argument_limit', { retryable: false, diagnostics: malformedBlockDiagnostics(result.blocks, block) });
     }
     return { ok: true };
   },

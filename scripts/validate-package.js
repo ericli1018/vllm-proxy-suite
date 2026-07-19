@@ -17,6 +17,7 @@ const required = [
   'packages/core/attempt-runner.js',
   'packages/core/buffer-budget.js',
   'packages/core/config.js',
+  'packages/core/json-diagnostics.js',
   'packages/core/loop-detector.js',
   'packages/core/sse.js',
   'packages/core/tool-correlation.js',
@@ -51,7 +52,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.5.0') errors.push('package.json version must be 0.5.0');
+if (packageJson.version !== '0.5.1') errors.push('package.json version must be 0.5.1');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');

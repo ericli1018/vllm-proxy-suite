@@ -1,13 +1,16 @@
-# VLLM-PROXY-SUITE v0.5.0 Validation
+# VLLM-PROXY-SUITE v0.5.1 Validation
 
 Validated in the artifact environment:
 
-- `npm test`: 87 tests passed, 0 failed.
+- `npm test`: 95 tests passed, 0 failed.
 - `npm run check`: passed.
 - All production JavaScript files passed `node --check`.
 - Compose YAML parsed successfully and defines exactly one `vllm-proxy-suite` service on `3456:3456`.
 - Compose startup shell passed `sh -n`.
 - Semantic counters exclude metadata, pings, usage and completion events.
+- Tool Call continuation fragments without a repeated Chat Completions `index` remain attached to the active call.
+- Debug progress reports exact Tool Call count and per-call argument bytes/fragments across all three guarded protocols.
+- Malformed Tool JSON exposes safe parse category/offset/line/column diagnostics and bypasses generic Proxy Recovery.
 - Fragmented Chat Completions and Responses tool arguments count as semantic activity.
 - Transport chunks and parsed SSE events are reported separately.
 - Request duration and rate calculations use a monotonic clock.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1 - 2026-07-19
+
+- Added exact Tool Call count, indexes, IDs, names, per-call argument bytes, and fragment counts to debug progress for Chat Completions, Responses, and Anthropic Messages.
+- Fixed Chat Completions continuation fragments without a repeated `index` being misclassified as new Tool Calls.
+- Added safe JSON parse diagnostics for malformed Tool arguments, including category, byte offset, line, column, Tool identity, and argument size without logging payload contents.
+- Marked malformed, oversized, invalid, and excessive Tool Call structures as non-retryable by the generic Proxy Recovery path.
+- Propagated safe retryability and Tool diagnostics into terminal error logs and protocol error responses.
+- Added regression coverage for single-call continuation, parallel Tool Call accounting, cross-protocol diagnostics, and retry-storm prevention.
+
 ## 0.5.0 - 2026-07-19
 
 - Replaced synthetic semantic scores with UTF-8 byte counters for reasoning, content, tool names, and fragmented tool arguments.

@@ -34,3 +34,18 @@ Tool classifier 不依賴固定產品名稱。明確 exact-name 設定具有最�
 Read freshness 依 accepted history 追蹤。任何 failed mutation 會使該 target 的先前 Read 失效；任何 Bash Tool Result 會依預設設定清除全部 Read freshness。
 
 沒有新鮮 target evidence 時，Recovery 只允許精確 `Read`。已有新鮮 evidence 時，Recovery 只允許原 mutation tool，並鎖定 target、禁止 no-op、禁止 `replace_all` 擴張及原參數重送。
+
+## Deterministic Tool JSON failures
+
+The generic Recovery path does not retry deterministic Tool structure failures:
+
+```text
+malformed_tool_arguments
+malformed_tool_json
+invalid_tool_arguments
+invalid_tool_input
+tool_argument_limit
+too_many_tool_calls
+```
+
+These failures return `retryable:false` with payload-safe diagnostics. They do not include Tool argument contents. Model-strategy recovery such as sequential chunked file output is handled separately rather than replaying the same generic generation.

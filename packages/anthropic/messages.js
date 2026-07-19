@@ -69,6 +69,33 @@ function collectToolBlockDiagnostics(blocks) {
   };
 }
 
+function collectCompletionDiagnostics(result) {
+  const prompt = Number.isFinite(Number(result?.messageStart?.message?.usage?.input_tokens ?? result?.payload?.usage?.input_tokens))
+    ? Number(result?.messageStart?.message?.usage?.input_tokens ?? result?.payload?.usage?.input_tokens)
+    : null;
+  const completion = Number.isFinite(Number(result?.messageDelta?.usage?.output_tokens ?? result?.payload?.usage?.output_tokens))
+    ? Number(result?.messageDelta?.usage?.output_tokens ?? result?.payload?.usage?.output_tokens)
+    : null;
+  return {
+    messageStopped: typeof result?.messageStopped === 'boolean' ? result.messageStopped : null,
+    stopReason: result?.stopReason ?? result?.payload?.stop_reason ?? null,
+    usagePromptTokens: prompt,
+    usageCompletionTokens: completion,
+    usageTotalTokens: prompt !== null && completion !== null ? prompt + completion : null,
+  };
+}
+
+function withCompletionDiagnostics(result, validation) {
+  if (validation?.ok) return validation;
+  return {
+    ...validation,
+    diagnostics: {
+      ...collectCompletionDiagnostics(result),
+      ...(validation?.diagnostics || {}),
+    },
+  };
+}
+
 function malformedBlockDiagnostics(blocks, block) {
   return {
     ...collectToolBlockDiagnostics(blocks),
@@ -181,7 +208,7 @@ class AnthropicMessagesStreamParser {
             block.toolJsonErrorDiagnostics = null;
           } catch (error) {
             block.toolJsonError = error instanceof Error ? error.message : String(error);
-            block.toolJsonErrorDiagnostics = classifyJsonParseError(error);
+            block.toolJsonErrorDiagnostics = classifyJsonParseError(error, block.partialJson);
           }
         }
         break;
@@ -220,6 +247,10 @@ class AnthropicMessagesStreamParser {
         toolArgumentBytes: this.toolArgumentBytes,
         semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
         ...collectToolBlockDiagnostics(this.blocks),
+        ...collectCompletionDiagnostics({
+          messageStart: this.messageStart, messageDelta: this.messageDelta,
+          messageStopped: this.messageStopped, stopReason: this.stopReason,
+        }),
       },
     };
   }
@@ -339,6 +370,7 @@ export const anthropicMessagesAdapter = Object.freeze({
   path: '/v1/messages',
   createStreamParser() { return new AnthropicMessagesStreamParser(); },
   getReasoning(result) { return result.blocks.filter((block) => block.type === 'thinking' && block.thinking).map((block) => block.thinking); },
+  completionDiagnostics(result) { return collectCompletionDiagnostics(result); },
   semanticMetrics(result) {
     if (result.semanticMetrics) return { ...result.semanticMetrics, sseEvents: result.eventCount || 0 };
     let reasoningBytes = 0;
@@ -361,6 +393,7 @@ export const anthropicMessagesAdapter = Object.freeze({
       semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
       sseEvents: result.eventCount || 0,
       ...collectToolBlockDiagnostics(result.blocks),
+      ...collectCompletionDiagnostics(result),
     };
   },
   semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
@@ -373,10 +406,10 @@ export const anthropicMessagesAdapter = Object.freeze({
     }
     return { ok: true };
   },
-  validateStream(result, config) { return validateBlocks(result, config, true); },
+  validateStream(result, config) { return withCompletionDiagnostics(result, validateBlocks(result, config, true)); },
   parseJson(buffer) { return normalizeNonStream(JSON.parse(buffer.toString('utf8'))); },
   getJsonReasoning(result) { return this.getReasoning(result); },
-  validateJson(result, config) { return validateBlocks(result, config, true); },
+  validateJson(result, config) { return withCompletionDiagnostics(result, validateBlocks(result, config, true)); },
   extractOutput(result) {
     const toolCalls = [];
     let finalText = '';

@@ -30,6 +30,11 @@ export function trimTrailingSlash(value) {
 }
 
 export function loadCommonConfig(env = process.env, defaults = {}) {
+  const toolArgumentWarningBytes = parseInteger(env.TOOL_ARGUMENT_WARNING_BYTES, 8 * 1024, { min: 0 });
+  const configuredCriticalBytes = parseInteger(env.TOOL_ARGUMENT_CRITICAL_BYTES, 16 * 1024, { min: 0 });
+  const toolArgumentCriticalBytes = configuredCriticalBytes > 0 && toolArgumentWarningBytes > 0
+    ? Math.max(configuredCriticalBytes, toolArgumentWarningBytes)
+    : configuredCriticalBytes;
   return Object.freeze({
     host: env.PROXY_HOST || defaults.host || '0.0.0.0',
     port: parseInteger(env.PROXY_PORT, defaults.port || 3456, { min: 1, max: 65535 }),
@@ -66,7 +71,11 @@ export function loadCommonConfig(env = process.env, defaults = {}) {
     progressStallWarningMs: parseInteger(env.PROGRESS_STALL_WARNING_MS, 30000, { min: 1000 }),
     logToolPayloads: parseBoolean(env.LOG_TOOL_PAYLOADS, false),
     logToolPayloadMaxBytes: parseInteger(env.LOG_TOOL_PAYLOAD_MAX_BYTES, 1024, { min: 0 }),
+    toolArgumentWarningBytes,
+    toolArgumentCriticalBytes,
     toolCorrelationTtlMs: parseInteger(env.TOOL_CORRELATION_TTL_MS, 15 * 60 * 1000, { min: 1000 }),
     toolCorrelationMaxEntries: parseInteger(env.TOOL_CORRELATION_MAX_ENTRIES, 10000, { min: 1 }),
+    clientRetryFingerprintTtlMs: parseInteger(env.CLIENT_RETRY_FINGERPRINT_TTL_MS, 15 * 60 * 1000, { min: 1000 }),
+    clientRetryFingerprintMaxEntries: parseInteger(env.CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES, 10000, { min: 1 }),
   });
 }

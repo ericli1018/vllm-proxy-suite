@@ -7,6 +7,7 @@ import { BufferBudget } from '../core/buffer-budget.js';
 import { performBufferedAttempt } from '../core/attempt-runner.js';
 import { buildUpstreamHeaders, copyResponseHeaders, jsonResponse, readRequestBody, writeNodeResponseBody } from '../core/http.js';
 import { createLogger } from '../core/logger.js';
+import { fingerprintRequest, RequestFingerprintRegistry } from '../core/request-fingerprint.js';
 import { ToolCallCorrelationRegistry } from '../core/tool-correlation.js';
 
 function secureEqual(actual, expected) {
@@ -34,6 +35,9 @@ function createMetrics() {
     validationFailuresTotal: 0,
     clientCancellationsTotal: 0,
     responseReplayInterruptionsTotal: 0,
+    clientRetriesDetectedTotal: 0,
+    toolArgumentWarningsTotal: 0,
+    toolArgumentCriticalTotal: 0,
   };
 }
 
@@ -47,25 +51,53 @@ export function renderProtocolMetrics(metrics, prefix) {
   return `${rows.join('\n')}\n`;
 }
 
-function summarizeToolResults(body) {
+function toolResultsFromMessage(message) {
   const summaries = [];
-  for (const message of Array.isArray(body?.messages) ? body.messages : []) {
-    if (message?.role === 'tool') {
-      summaries.push({ id: message.tool_call_id || null, name: message.name || null });
-      continue;
-    }
-    const content = Array.isArray(message?.content) ? message.content : [];
-    for (const block of content) {
-      if (block?.type === 'tool_result') summaries.push({ id: block.tool_use_id || null, isError: Boolean(block.is_error) });
-    }
+  if (message?.role === 'tool') {
+    summaries.push({ id: message.tool_call_id || null, name: message.name || null, isError: Boolean(message.error) });
+    return summaries;
   }
+  for (const block of Array.isArray(message?.content) ? message.content : []) {
+    if (block?.type === 'tool_result') summaries.push({ id: block.tool_use_id || null, isError: Boolean(block.is_error) });
+  }
+  return summaries;
+}
+
+function isToolResultMessage(message) {
+  if (message?.role === 'tool') return true;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return content.length > 0 && content.every((block) => block?.type === 'tool_result');
+}
+
+export function summarizeToolResultContext(body) {
+  const history = [];
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  for (const message of messages) history.push(...toolResultsFromMessage(message));
+
+  const latestMessages = [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isToolResultMessage(message)) break;
+    latestMessages.unshift(...toolResultsFromMessage(message));
+  }
+
   const responsesInput = Array.isArray(body?.input) ? body.input : [];
   for (const item of responsesInput) {
     if (item?.type === 'function_call_output') {
-      summaries.push({ id: item.call_id || item.id || null, name: item.name || null, isError: Boolean(item.error) });
+      history.push({ id: item.call_id || item.id || null, name: item.name || null, isError: Boolean(item.error) });
     }
   }
-  return summaries;
+  const latestResponses = [];
+  for (let index = responsesInput.length - 1; index >= 0; index -= 1) {
+    const item = responsesInput[index];
+    if (item?.type !== 'function_call_output') break;
+    latestResponses.unshift({ id: item.call_id || item.id || null, name: item.name || null, isError: Boolean(item.error) });
+  }
+
+  return {
+    history,
+    latestTurn: [...latestMessages, ...latestResponses],
+  };
 }
 
 function recoverable(attempt) {
@@ -218,6 +250,10 @@ export function createProtocolProxyRuntime({
     ttlMs: config.toolCorrelationTtlMs,
     maxEntries: config.toolCorrelationMaxEntries,
   });
+  const requestFingerprints = new RequestFingerprintRegistry({
+    ttlMs: config.clientRetryFingerprintTtlMs,
+    maxEntries: config.clientRetryFingerprintMaxEntries,
+  });
   let draining = false;
 
   const handle = async (request, response) => {
@@ -244,10 +280,12 @@ export function createProtocolProxyRuntime({
     const elapsedMs = () => Math.max(0, Math.round(performance.now() - requestStartedAtMono));
     const requestLogger = rootLogger.child({ service: name, requestId, protocol: metricPrefix, path, method: request.method });
     let terminalEvent = null;
+    let requestFingerprint = null;
     const terminal = (event, fields = {}, level = 'info') => {
       if (terminalEvent) return false;
       terminalEvent = event;
       requestLogger[level](event, { ...fields, elapsedMs: fields.elapsedMs ?? elapsedMs() });
+      if (requestFingerprint) requestFingerprints.complete(requestFingerprint, requestId, event, fields);
       return true;
     };
     const rejectRequest = (status, type, message, extraHeaders = {}) => {
@@ -296,6 +334,27 @@ export function createProtocolProxyRuntime({
       } catch (error) {
         return rejectRequest(413, error.code || 'request_body_limit', error.message);
       }
+      requestFingerprint = fingerprintRequest(path, rawRequest);
+      const retry = requestFingerprints.observe(requestFingerprint, requestId);
+      const requestFingerprintShort = requestFingerprint.slice(0, 16);
+      requestLogger.debug('request_fingerprint_registered', { requestFingerprint: requestFingerprintShort });
+      if (retry) {
+        const previousFields = retry.previousTerminalFields || {};
+        const retryFields = {
+          requestFingerprint: requestFingerprintShort,
+          previousRequestId: retry.previousRequestId,
+          previousTerminalEvent: retry.previousTerminalEvent,
+          previousFailureReason: previousFields.reason || null,
+          previousFailureKind: previousFields.kind || null,
+          previousRetryable: previousFields.retryable ?? null,
+          retryDelayMs: retry.retryDelayMs,
+          retryOrdinal: retry.retryOrdinal,
+        };
+        const retryLevel = !retry.previousTerminalEvent || ['request_failed', 'request_cancelled'].includes(retry.previousTerminalEvent) ? 'warn' : 'debug';
+        metrics.clientRetriesDetectedTotal += 1;
+        requestLogger[retryLevel]('client_retry_detected', retryFields);
+      }
+
       let originalBody;
       try {
         originalBody = JSON.parse(rawRequest.toString('utf8'));
@@ -303,20 +362,32 @@ export function createProtocolProxyRuntime({
         return rejectRequest(400, 'invalid_request_json', 'request body must be valid JSON');
       }
 
-      const toolResults = summarizeToolResults(originalBody);
-      if (toolResults.length > 0) {
-        const matches = correlations.resolve(toolResults);
+      const toolResultContext = summarizeToolResultContext(originalBody);
+      if (toolResultContext.history.length > 0) {
+        const latestToolResults = toolResultContext.latestTurn;
+        const matches = correlations.resolve(latestToolResults);
         const parentRequestIds = [...new Set(matches.map((match) => match.parentRequestId))];
-        const toolCallIds = toolResults.map((result) => result.id).filter(Boolean);
-        requestLogger.info('tool_results_received', {
-          count: toolResults.length,
-          toolCallIds,
-          parentRequestIds,
-          toolRoundTripMs: matches.length > 0 ? Math.max(...matches.map((match) => match.roundTripMs)) : null,
+        const latestToolCallIds = latestToolResults.map((result) => result.id).filter(Boolean);
+        requestLogger.debug('tool_result_context', {
+          historyCount: toolResultContext.history.length,
+          latestTurnCount: latestToolResults.length,
           correlatedCount: matches.length,
+          historyToolCallIds: toolResultContext.history.map((result) => result.id).filter(Boolean),
+          latestTurnToolCallIds: latestToolCallIds,
+          parentRequestIds,
         });
+        if (latestToolResults.length > 0) {
+          requestLogger.info('tool_results_received', {
+            count: latestToolResults.length,
+            historyCount: toolResultContext.history.length,
+            toolCallIds: latestToolCallIds,
+            parentRequestIds,
+            toolRoundTripMs: matches.length > 0 ? Math.max(...matches.map((match) => match.roundTripMs)) : null,
+            correlatedCount: matches.length,
+          });
+        }
         if (config.logToolPayloads && requestLogger.isEnabled('trace')) {
-          requestLogger.trace('tool_results_payload', { preview: payloadPreview(toolResults, config.logToolPayloadMaxBytes) });
+          requestLogger.trace('tool_results_payload', { preview: payloadPreview(latestToolResults, config.logToolPayloadMaxBytes) });
         }
       }
 
@@ -330,9 +401,36 @@ export function createProtocolProxyRuntime({
       const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
       let lastTransportWarningAtMono = 0;
       let lastSemanticWarningAtMono = 0;
+      const emittedToolGrowthWarnings = new Set();
       const debugEnabled = requestLogger.isEnabled('debug');
       const traceEnabled = requestLogger.isEnabled('trace');
       const warnEnabled = requestLogger.isEnabled('warn');
+      const emitToolGrowthWarnings = (snapshot, attemptNumber, phase) => {
+        if (!warnEnabled) return;
+        for (const tool of snapshot.toolCalls || []) {
+          const baseKey = `${attemptNumber}:${tool.key}`;
+          const fields = {
+            attempt: attemptNumber,
+            phase,
+            toolCallKey: tool.key,
+            toolCallIndex: tool.index,
+            toolCallId: tool.id || null,
+            toolName: tool.name || 'unknown',
+            toolArgumentBytes: tool.argumentBytes || 0,
+            toolArgumentFragments: tool.argumentFragments || 0,
+          };
+          if (config.toolArgumentWarningBytes > 0 && tool.argumentBytes >= config.toolArgumentWarningBytes && !emittedToolGrowthWarnings.has(`${baseKey}:warning`)) {
+            emittedToolGrowthWarnings.add(`${baseKey}:warning`);
+            metrics.toolArgumentWarningsTotal += 1;
+            requestLogger.warn('tool_argument_growth_warning', { ...fields, thresholdBytes: config.toolArgumentWarningBytes });
+          }
+          if (config.toolArgumentCriticalBytes > 0 && tool.argumentBytes >= config.toolArgumentCriticalBytes && !emittedToolGrowthWarnings.has(`${baseKey}:critical`)) {
+            emittedToolGrowthWarnings.add(`${baseKey}:critical`);
+            metrics.toolArgumentCriticalTotal += 1;
+            requestLogger.warn('tool_argument_growth_critical', { ...fields, thresholdBytes: config.toolArgumentCriticalBytes });
+          }
+        }
+      };
       const makeObserver = (attemptNumber, phase) => {
         if (!debugEnabled && !traceEnabled && !warnEnabled) return null;
         return {
@@ -341,6 +439,7 @@ export function createProtocolProxyRuntime({
           ...((debugEnabled || warnEnabled) ? {
             onProgress(snapshot) {
               const progress = { ...snapshot, phase };
+              emitToolGrowthWarnings(snapshot, attemptNumber, phase);
               if (debugEnabled) requestLogger.debug('request_progress', progress);
               if (!warnEnabled) return;
               const now = performance.now();
@@ -492,6 +591,7 @@ export function createProtocolProxyRuntime({
           toolCallCount: toolCalls.length,
           finalTextChars: typeof output.finalText === 'string' ? output.finalText.length : 0,
           replayDurationMs,
+          ...(route.adapter.completionDiagnostics?.(attempt.result) || {}),
         });
         return;
       }

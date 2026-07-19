@@ -104,7 +104,7 @@ function finalizeTools(choices) {
       } catch (error) {
         tool.parsedArguments = null;
         tool.argumentError = error instanceof Error ? error.message : String(error);
-        tool.argumentErrorDiagnostics = classifyJsonParseError(error);
+        tool.argumentErrorDiagnostics = classifyJsonParseError(error, tool.arguments);
       }
     }
   }
@@ -137,6 +137,42 @@ function collectToolDiagnostics(choices) {
     toolArgumentFragmentsByCall: Object.fromEntries(toolCalls.map((tool) => [tool.key, tool.argumentFragments])),
     parallelToolCallsDetected: toolCalls.length > 1,
     toolCalls,
+  };
+}
+
+function normalizedUsage(usage) {
+  const prompt = Number.isFinite(Number(usage?.prompt_tokens)) ? Number(usage.prompt_tokens) : null;
+  const completion = Number.isFinite(Number(usage?.completion_tokens)) ? Number(usage.completion_tokens) : null;
+  const total = Number.isFinite(Number(usage?.total_tokens))
+    ? Number(usage.total_tokens)
+    : (prompt !== null && completion !== null ? prompt + completion : null);
+  return {
+    usagePromptTokens: prompt,
+    usageCompletionTokens: completion,
+    usageTotalTokens: total,
+  };
+}
+
+function collectCompletionDiagnostics(result) {
+  const choices = result?.choices instanceof Map ? result.choices : new Map();
+  const finishReasonsByChoice = Object.fromEntries([...choices.entries()].map(([index, choice]) => [String(index), choice.finishReason ?? null]));
+  const finishReasons = Object.values(finishReasonsByChoice);
+  return {
+    doneReceived: typeof result?.done === 'boolean' ? result.done : null,
+    finishReason: finishReasons.length === 1 ? finishReasons[0] : null,
+    finishReasonsByChoice,
+    ...normalizedUsage(result?.usage),
+  };
+}
+
+function withCompletionDiagnostics(result, validation) {
+  if (validation?.ok) return validation;
+  return {
+    ...validation,
+    diagnostics: {
+      ...collectCompletionDiagnostics(result),
+      ...(validation?.diagnostics || {}),
+    },
   };
 }
 
@@ -220,6 +256,7 @@ class ChatCompletionsStreamParser {
         toolArgumentBytes: this.toolArgumentBytes,
         semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
         ...collectToolDiagnostics(this.choices),
+        ...collectCompletionDiagnostics({ done: this.done, choices: this.choices, usage: this.usage }),
       },
     };
   }
@@ -300,6 +337,7 @@ export const chatCompletionsAdapter = Object.freeze({
   path: '/v1/chat/completions',
   createStreamParser() { return new ChatCompletionsStreamParser(); },
   getReasoning(result) { return [...result.choices.values()].map((choice) => choice.reasoning).filter(Boolean); },
+  completionDiagnostics(result) { return collectCompletionDiagnostics(result); },
   semanticMetrics(result) {
     if (result.semanticMetrics) {
       return { ...result.semanticMetrics, sseEvents: (result.chunkCount || 0) + (result.done ? 1 : 0) };
@@ -324,6 +362,7 @@ export const chatCompletionsAdapter = Object.freeze({
       semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
       sseEvents: (result.chunkCount || 0) + (result.done ? 1 : 0),
       ...collectToolDiagnostics(result.choices),
+      ...collectCompletionDiagnostics(result),
     };
   },
   semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
@@ -344,18 +383,18 @@ export const chatCompletionsAdapter = Object.freeze({
     return { ok: true };
   },
   validateStream(result, config) {
-    if (!result.done) return invalid('missing_done');
-    if (result.error) return invalid('upstream_sse_error', result.error.message || 'upstream error');
-    if (result.structuralErrors.length) return invalid(result.structuralErrors[0]);
-    return validateChoices(result.choices, config);
+    if (!result.done) return withCompletionDiagnostics(result, invalid('missing_done'));
+    if (result.error) return withCompletionDiagnostics(result, invalid('upstream_sse_error', result.error.message || 'upstream error'));
+    if (result.structuralErrors.length) return withCompletionDiagnostics(result, invalid(result.structuralErrors[0]));
+    return withCompletionDiagnostics(result, validateChoices(result.choices, config));
   },
   parseJson(buffer) {
     return normalizeNonStream(JSON.parse(buffer.toString('utf8')));
   },
   getJsonReasoning(result) { return [...result.choices.values()].map((choice) => choice.reasoning).filter(Boolean); },
   validateJson(result, config) {
-    if (result.error) return invalid('upstream_json_error', result.error.message || 'upstream error');
-    return validateChoices(result.choices, config);
+    if (result.error) return withCompletionDiagnostics(result, invalid('upstream_json_error', result.error.message || 'upstream error'));
+    return withCompletionDiagnostics(result, validateChoices(result.choices, config));
   },
   extractOutput(result) {
     const toolCalls = [];

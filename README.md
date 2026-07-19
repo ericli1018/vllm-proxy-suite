@@ -156,10 +156,10 @@ VLLM_PROXY_SUITE_REF=main
 第一次啟動會以 shallow clone 初始化；named volume 已有 Repository 時會先將 `/app` 設為 Git safe directory，再強制同步指定 ref：
 
 ```text
-git -c safe.directory=/app -C /app <command>
-git -C /app fetch --force --prune origin <ref>
-git -C /app reset --hard FETCH_HEAD
-git -C /app clean -fdx
+git -c safe.directory=/app -C /app remote set-url origin <repository>
+git -c safe.directory=/app -C /app fetch --force --prune origin <ref>
+git -c safe.directory=/app -C /app reset --hard FETCH_HEAD
+git -c safe.directory=/app -C /app clean -fdx
 ```
 
 若正式環境要求可重現部署，應將 `VLLM_PROXY_SUITE_REF` 固定至 release branch／tag，或使用本專案 Dockerfile 建立不可變 Image。
@@ -285,6 +285,15 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `MAX_ACTIVE_REQUESTS` | `256`，每個 protocol runtime 各自計算 |
 | `MAX_RESPONSE_BUFFER_BYTES` | `33554432` |
 | `MAX_TOTAL_BUFFERED_BYTES` | `1073741824`，每個 protocol runtime 各自計算 |
+| `MAX_TOOL_ARGUMENT_BYTES` | `8388608`，單一 Tool Call 的硬上限 |
+| `TOOL_ARGUMENT_WARNING_BYTES` | `8192`，設為 `0` 可停用 warning |
+| `TOOL_ARGUMENT_CRITICAL_BYTES` | `16384`，設為 `0` 可停用 critical warning |
+| `TOOL_CORRELATION_TTL_MS` | `900000` |
+| `TOOL_CORRELATION_MAX_ENTRIES` | `10000` |
+| `CLIENT_RETRY_FINGERPRINT_TTL_MS` | `900000` |
+| `CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES` | `10000` |
+
+`TOOL_ARGUMENT_WARNING_BYTES` 與 `TOOL_ARGUMENT_CRITICAL_BYTES` 只發出診斷事件，不會截斷或改寫 Tool arguments。真正的拒絕門檻仍由 `MAX_TOOL_ARGUMENT_BYTES` 控制。Client retry fingerprint 使用 path 與原始 request body 的精確 SHA-256；只辨識 byte-identical retry，不會對相似 prompt 做模糊比對。
 
 ### Claude Code Recovery
 
@@ -339,15 +348,15 @@ npm run check
 
 ## Request progress logging
 
-The suite uses structured log levels. Reasoning, response text, source code, tool arguments and tool results are not logged by default.
+The suite uses structured log levels. Reasoning, response text, source code, Tool arguments and Tool results are not logged by default.
 
 | Level | Events |
 |---|---|
-| `error` | unrecoverable upstream, protocol, buffer, recovery, replay, and request failures |
-| `warn` | loop detection, client cancellation, transport stall, semantic stall, and rejected requests |
-| `info` | request lifecycle, recovery lifecycle, tool calls ready/replayed, tool results received, and response replay lifecycle |
-| `debug` | state transitions and periodic request progress with throughput, semantic byte counters, buffer estimates, and timing |
-| `trace` | upstream chunk metadata; optional redacted and truncated tool payload previews when explicitly enabled |
+| `error` | unrecoverable upstream, protocol, buffer, replay, and request failures |
+| `warn` | loop detection, cancellation, transport/semantic stalls, Tool argument growth thresholds, and failed-request client retries |
+| `info` | request lifecycle, recovery lifecycle, Tool calls ready/delivered, latest-turn Tool results, and replay lifecycle |
+| `debug` | state transitions, exact-request fingerprints, Tool Result history context, and periodic request progress |
+| `trace` | upstream chunk metadata; optional redacted and truncated Tool payload previews when explicitly enabled |
 
 Recommended troubleshooting settings:
 
@@ -357,27 +366,33 @@ LOG_FORMAT: "text"
 PROGRESS_LOG_INTERVAL_MS: "10000"
 PROGRESS_STALL_WARNING_MS: "30000"
 LOG_TOOL_PAYLOADS: "false"
+TOOL_ARGUMENT_WARNING_BYTES: "8192"
+TOOL_ARGUMENT_CRITICAL_BYTES: "16384"
 TOOL_CORRELATION_TTL_MS: "900000"
 TOOL_CORRELATION_MAX_ENTRIES: "10000"
+CLIENT_RETRY_FINGERPRINT_TTL_MS: "900000"
+CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES: "10000"
 ```
 
 Example debug record:
 
 ```text
-2026-07-19T00:00:00.000Z [debug] event=request_progress service="vllm-openai-proxy" requestId="..." phase="initial" attempt=1 state="upstream_streaming" elapsedMs=40000 upstreamBytes=18240 averageBytesPerSec=456 streamAverageBytesPerSec=612 recentBytesPerSec=590 upstreamChunks=93 sseEvents=147 reasoningBytes=7412 contentBytes=0 toolNameBytes=4 toolArgumentBytes=128 semanticBytes=7544 toolCallCount=1 toolCallIndexes=[0] toolNames=["Read"] toolArgumentBytesByCall={"choice:0/tool:0":128} toolArgumentFragmentsByCall={"choice:0/tool:0":6} parallelToolCallsDetected=false rawBufferedBytes=18240 estimatedRequestMemoryBytes=25784 globalBufferedBytes=18240 lastUpstreamActivityMs=183 lastSemanticActivityMs=183 timeToHeadersMs=12 timeToFirstByteMs=845 timeToFirstSemanticMs=901
+2026-07-19T00:00:00.000Z [debug] event=request_progress service="vllm-openai-proxy" requestId="..." phase="initial" attempt=1 state="upstream_streaming" elapsedMs=40000 upstreamBytes=18240 streamAverageBytesPerSec=612 recentBytesPerSec=590 upstreamChunks=93 sseEvents=147 reasoningBytes=7412 contentBytes=0 toolNameBytes=4 toolArgumentBytes=128 semanticBytes=7544 toolCallCount=1 toolCallIndexes=[0] toolNames=["Read"] toolArgumentBytesByCall={"choice:0/tool:0":128} toolArgumentFragmentsByCall={"choice:0/tool:0":6} parallelToolCallsDetected=false finishReason=null doneReceived=false usagePromptTokens=null usageCompletionTokens=null rawBufferedBytes=18240 estimatedRequestMemoryBytes=25784 globalBufferedBytes=18240 globalBufferUtilizationRatio=0.000017 globalBufferUtilizationPercent=0.0017 lastUpstreamActivityMs=183 lastSemanticActivityMs=183 timeToHeadersMs=12 timeToFirstByteMs=845 timeToFirstSemanticMs=901
 ```
 
 The counters have distinct meanings:
 
 - `upstreamChunks`: calls to the upstream stream reader. This is transport chunking, not an SSE frame count.
 - `sseEvents`: complete protocol events parsed by the active adapter.
-- `semanticBytes`: UTF-8 bytes from reasoning, content, tool names and fragmented tool arguments only. Metadata, role-only chunks, usage, ping, completion markers and `[DONE]` do not increment it.
-- `toolCallCount`: current distinct Tool Calls, not Tool argument fragment count. `toolArgumentFragmentsByCall` reports the fragment count separately.
+- `semanticBytes`: UTF-8 bytes from reasoning, content, Tool names and fragmented Tool arguments only. Metadata, role-only chunks, usage, ping, completion markers and `[DONE]` do not increment it.
+- `toolCallCount`: current distinct Tool Calls, not Tool argument fragment count. `toolArgumentFragmentsByCall` reports fragment count separately.
 - `parallelToolCallsDetected`: `true` when the current assistant response contains more than one Tool Call.
+- `finishReason` / `finishReasonsByChoice`, `doneReceived`, `messageStopped`, `responseCompleted`, and normalized usage fields explain how the upstream attempt terminated.
 - `lastUpstreamActivityMs`: time since any upstream bytes arrived.
 - `lastSemanticActivityMs`: time since actual semantic bytes increased.
 - `rawBufferedBytes`: raw upstream bytes retained for Protected Streaming.
-- `estimatedRequestMemoryBytes`: diagnostic estimate including raw and parsed data; it is not a Node heap accounting metric.
+- `estimatedRequestMemoryBytes`: diagnostic estimate including raw and parsed data; it is not Node heap accounting.
+- `globalBufferUtilizationRatio` and `globalBufferUtilizationPercent`: unambiguous ratio and percentage views; the legacy `globalBufferUtilization` field remains for compatibility.
 
 Request states include:
 
@@ -390,7 +405,7 @@ attempt_validating
 response_replay_started / response_replay_completed
 ```
 
-For Hermes tool-loop diagnosis, use this event sequence:
+For Hermes Tool-loop diagnosis, use this event sequence:
 
 ```text
 tool_calls_ready
@@ -400,12 +415,30 @@ tool_calls_delivered
 request_completed
 
 # Next Hermes request
-tool_results_received parentRequestIds=[...]
+tool_result_context historyCount=... latestTurnCount=...
+tool_results_received count=... parentRequestIds=[...]
 ```
 
-`tool_calls_delivered` means Node emitted `finish` for the protected response replay. It confirms that the response bytes were handed to the outgoing stream, but it is not an application-level acknowledgement from Hermes. `tool_results_received` is the stronger evidence that Hermes parsed the call, executed the tool, and submitted the next request. Tool-call correlation is bounded by `TOOL_CORRELATION_TTL_MS` and `TOOL_CORRELATION_MAX_ENTRIES`.
+`tool_result_context` is a `debug` event: `historyCount` covers the full conversation history, while `latestTurnCount` covers only trailing Tool Result carrier messages in the new request. `tool_results_received` is emitted only when `latestTurnCount > 0`; it no longer republishes every historical Tool Result as a new receipt.
 
-Malformed Tool JSON errors include payload-safe parse diagnostics and `retryable:false`. Generic Proxy Recovery is skipped for malformed, invalid, oversized, or excessive Tool structures so that the same deterministic failure is not regenerated inside the Proxy.
+`tool_calls_delivered` means Node emitted `finish` for protected response replay. It confirms response bytes were handed to the outgoing stream, but is not an application-level acknowledgement from Hermes. A correlated `tool_results_received` is stronger evidence that Hermes parsed the call, executed the tool, and submitted the next request.
+
+When Tool arguments cross configured thresholds, each attempt/Tool Call emits at most one `tool_argument_growth_warning` and one `tool_argument_growth_critical`. These are diagnostics only; the payload is not logged and the Tool Call is not modified.
+
+Malformed Tool JSON errors include payload-safe diagnostics and `retryable:false`, including Tool identity, per-call bytes/fragments, `parseErrorCategory`, and parse offsets. `parseErrorOffsetUnit="utf16_code_unit"` makes the JavaScript parser position explicit; UTF-8 byte length, UTF-16 length, Unicode code-point count, and `parseErrorAtEnd` are reported separately.
+
+Exact byte-identical request retries within the configured TTL emit `client_retry_detected` and increment the protocol metric. The event includes the previous request ID and terminal outcome, but only a shortened hash is logged. Semantically similar requests whose bytes changed are intentionally not correlated.
+
+New Prometheus counters include:
+
+```text
+vllm_openai_proxy_client_retries_detected_total
+vllm_openai_proxy_tool_argument_warnings_total
+vllm_openai_proxy_tool_argument_critical_total
+vllm_cc_proxy_client_retries_detected_total
+vllm_cc_proxy_tool_argument_warnings_total
+vllm_cc_proxy_tool_argument_critical_total
+```
 
 Every logged `request_started` terminates with exactly one of:
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 - 2026-07-19
+
+- Added normalized completion-boundary diagnostics for Chat Completions, Responses, and Anthropic Messages, including finish/stop status, protocol completion markers, and usage tokens.
+- Split Tool Result diagnostics into full conversation history and latest-turn results; only latest-turn results emit `tool_results_received` and participate in correlation.
+- Added bounded exact-request fingerprint correlation and `client_retry_detected` events with previous terminal outcome, retry delay, and ordinal.
+- Added configurable per-Tool argument warning/critical thresholds with once-per-attempt events and Prometheus counters.
+- Clarified JSON parse offsets as UTF-16 code-unit positions and added UTF-8, UTF-16, code-point, and end-of-input diagnostics without logging Tool payloads.
+- Added unambiguous global buffer ratio/percentage fields while retaining the legacy ratio field.
+- Fixed the README Git update example so every existing-repository Git command uses command-local `safe.directory=/app`.
+- Added regression coverage for completion diagnostics, Tool Result history separation, retry TTL/ordinal behavior, and Tool argument threshold events.
+
 ## 0.5.1 - 2026-07-19
 
 - Added exact Tool Call count, indexes, IDs, names, per-call argument bytes, and fragment counts to debug progress for Chat Completions, Responses, and Anthropic Messages.

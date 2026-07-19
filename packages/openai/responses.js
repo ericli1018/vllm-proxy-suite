@@ -18,7 +18,7 @@ function finalizeCalls(calls) {
     } catch (error) {
       call.parsedArguments = null;
       call.argumentError = error instanceof Error ? error.message : String(error);
-      call.argumentErrorDiagnostics = classifyJsonParseError(error);
+      call.argumentErrorDiagnostics = classifyJsonParseError(error, call.arguments);
     }
   }
 }
@@ -43,6 +43,40 @@ function collectFunctionCallDiagnostics(functionCalls) {
     toolArgumentFragmentsByCall: Object.fromEntries(toolCalls.map((tool) => [tool.key, tool.argumentFragments])),
     parallelToolCallsDetected: toolCalls.length > 1,
     toolCalls,
+  };
+}
+
+function normalizedUsage(usage) {
+  const prompt = Number.isFinite(Number(usage?.input_tokens)) ? Number(usage.input_tokens) : null;
+  const completion = Number.isFinite(Number(usage?.output_tokens)) ? Number(usage.output_tokens) : null;
+  const total = Number.isFinite(Number(usage?.total_tokens))
+    ? Number(usage.total_tokens)
+    : (prompt !== null && completion !== null ? prompt + completion : null);
+  return {
+    usagePromptTokens: prompt,
+    usageCompletionTokens: completion,
+    usageTotalTokens: total,
+  };
+}
+
+function collectCompletionDiagnostics(result) {
+  const response = result?.response || result?.payload || null;
+  return {
+    responseCompleted: typeof result?.completed === 'boolean' ? result.completed : null,
+    responseFailed: typeof result?.failed === 'boolean' ? result.failed : null,
+    responseStatus: response?.status ?? null,
+    ...normalizedUsage(response?.usage || result?.payload?.usage),
+  };
+}
+
+function withCompletionDiagnostics(result, validation) {
+  if (validation?.ok) return validation;
+  return {
+    ...validation,
+    diagnostics: {
+      ...collectCompletionDiagnostics(result),
+      ...(validation?.diagnostics || {}),
+    },
   };
 }
 
@@ -97,7 +131,8 @@ class ResponsesStreamParser {
     const type = payload?.type || frame.event;
     if (type === 'error' || type === 'response.failed') {
       this.failed = true;
-      this.error = payload?.error || payload;
+      this.error = payload?.error || payload?.response?.error || payload;
+      if (payload?.response) this.response = payload.response;
       return;
     }
     if (type === 'response.completed') {
@@ -195,6 +230,9 @@ class ResponsesStreamParser {
         toolArgumentBytes: this.toolArgumentBytes,
         semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
         ...collectFunctionCallDiagnostics(this.functionCalls),
+        ...collectCompletionDiagnostics({
+          completed: this.completed, failed: this.failed, response: this.response,
+        }),
       },
     };
   }
@@ -259,6 +297,7 @@ export const responsesAdapter = Object.freeze({
   path: '/v1/responses',
   createStreamParser() { return new ResponsesStreamParser(); },
   getReasoning(result) { return result.reasoning ? [result.reasoning] : []; },
+  completionDiagnostics(result) { return collectCompletionDiagnostics(result); },
   semanticMetrics(result) {
     if (result.semanticMetrics) return { ...result.semanticMetrics, sseEvents: result.eventCount || 0 };
     const reasoningBytes = Buffer.byteLength(result.reasoning || '', 'utf8');
@@ -277,6 +316,7 @@ export const responsesAdapter = Object.freeze({
       semanticBytes: reasoningBytes + contentBytes + toolNameBytes + toolArgumentBytes,
       sseEvents: result.eventCount || 0,
       ...collectFunctionCallDiagnostics(result.functionCalls),
+      ...collectCompletionDiagnostics(result),
     };
   },
   semanticProgress(result) { return this.semanticMetrics(result).semanticBytes; },
@@ -290,10 +330,10 @@ export const responsesAdapter = Object.freeze({
     }
     return { ok: true };
   },
-  validateStream(result, config) { return validateResult(result, config, true); },
+  validateStream(result, config) { return withCompletionDiagnostics(result, validateResult(result, config, true)); },
   parseJson(buffer) { return normalizeNonStream(JSON.parse(buffer.toString('utf8'))); },
   getJsonReasoning(result) { return result.reasoning ? [result.reasoning] : []; },
-  validateJson(result, config) { return validateResult(result, config, true); },
+  validateJson(result, config) { return withCompletionDiagnostics(result, validateResult(result, config, true)); },
   extractOutput(result) { return { toolCalls: [...result.functionCalls.values()], finalText: result.outputText || '' }; },
   streamError(error) { return `event: error\ndata: ${JSON.stringify({ type: 'error', error })}\n\n`; },
   jsonError(error) { return { error }; },

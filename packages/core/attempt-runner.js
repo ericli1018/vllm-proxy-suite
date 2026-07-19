@@ -48,6 +48,29 @@ function emptySemanticMetrics() {
     toolArgumentFragmentsByCall: {},
     parallelToolCallsDetected: false,
     toolCalls: [],
+    doneReceived: null,
+    finishReason: null,
+    finishReasonsByChoice: {},
+    responseCompleted: null,
+    responseFailed: null,
+    responseStatus: null,
+    messageStopped: null,
+    stopReason: null,
+    usagePromptTokens: null,
+    usageCompletionTokens: null,
+    usageTotalTokens: null,
+  };
+}
+
+function withAdapterDiagnostics(adapter, result, validation) {
+  if (!validation || validation.ok) return validation;
+  const completion = adapter.completionDiagnostics?.(result) || {};
+  return {
+    ...validation,
+    diagnostics: {
+      ...completion,
+      ...(validation.diagnostics || {}),
+    },
   };
 }
 
@@ -139,6 +162,18 @@ export async function performBufferedAttempt({
       toolArgumentBytesByCall: semantic.toolArgumentBytesByCall,
       toolArgumentFragmentsByCall: semantic.toolArgumentFragmentsByCall,
       parallelToolCallsDetected: semantic.parallelToolCallsDetected,
+      toolCalls: semantic.toolCalls,
+      doneReceived: semantic.doneReceived,
+      finishReason: semantic.finishReason,
+      finishReasonsByChoice: semantic.finishReasonsByChoice,
+      responseCompleted: semantic.responseCompleted,
+      responseFailed: semantic.responseFailed,
+      responseStatus: semantic.responseStatus,
+      messageStopped: semantic.messageStopped,
+      stopReason: semantic.stopReason,
+      usagePromptTokens: semantic.usagePromptTokens,
+      usageCompletionTokens: semantic.usageCompletionTokens,
+      usageTotalTokens: semantic.usageTotalTokens,
       rawBufferedBytes,
       bufferedBytes: rawBufferedBytes,
       parsedSemanticBytes: semantic.semanticBytes,
@@ -147,6 +182,8 @@ export async function performBufferedAttempt({
       globalBufferedBytes: bufferBudget.total,
       globalBufferLimitBytes: bufferBudget.limit,
       globalBufferUtilization: bufferBudget.limit > 0 ? Number((bufferBudget.total / bufferBudget.limit).toFixed(6)) : 0,
+      globalBufferUtilizationRatio: bufferBudget.limit > 0 ? Number((bufferBudget.total / bufferBudget.limit).toFixed(6)) : 0,
+      globalBufferUtilizationPercent: bufferBudget.limit > 0 ? Number(((bufferBudget.total / bufferBudget.limit) * 100).toFixed(4)) : 0,
       lastUpstreamActivityMs: Math.round(now - lastByteAtMono),
       lastSemanticActivityMs: Math.round(now - lastSemanticAtMono),
       timeToHeadersMs: headersAtMono === null ? null : Math.round(headersAtMono - startedAtMono),
@@ -225,7 +262,7 @@ export async function performBufferedAttempt({
       setState('attempt_validating');
       const loopInfo = detectFromTexts(adapter.getJsonReasoning?.(result) || [], config);
       if (loopInfo) return { kind: 'loop', loopInfo, result };
-      const validation = adapter.validateJson(result, config);
+      const validation = withAdapterDiagnostics(adapter, result, adapter.validateJson(result, config));
       if (!validation.ok) return { kind: 'invalid', ...validation, result };
       return { kind: 'success', rawBody: Buffer.concat(chunks), result, status: response.status, headers: response.headers };
     }
@@ -275,7 +312,7 @@ export async function performBufferedAttempt({
         return { kind: 'invalid', reason: 'stream_parse_error', message: safeMessage(error) };
       }
       const snapshot = parser.snapshot();
-      const incremental = adapter.validateIncremental?.(snapshot, config);
+      const incremental = withAdapterDiagnostics(adapter, snapshot, adapter.validateIncremental?.(snapshot, config));
       if (incremental && !incremental.ok) {
         controller.abort(incremental.reason);
         await reader.cancel(incremental.reason).catch(() => {});
@@ -324,7 +361,7 @@ export async function performBufferedAttempt({
     setState('attempt_validating');
     const finalLoop = detectFromTexts(adapter.getReasoning(result) || [], config);
     if (finalLoop) return { kind: 'loop', loopInfo: finalLoop, result };
-    const validation = adapter.validateStream(result, config);
+    const validation = withAdapterDiagnostics(adapter, result, adapter.validateStream(result, config));
     if (!validation.ok) return { kind: 'invalid', ...validation, result };
     return { kind: 'success', rawBody: Buffer.concat(chunks), result, status: response.status, headers: response.headers };
   } finally {

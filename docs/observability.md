@@ -3,12 +3,12 @@
 ## Log level policy
 
 - `error`: terminal failures only.
-- `warn`: abnormal but diagnosable conditions, including stalls, loops, cancellations, and rejected guarded requests.
-- `info`: request lifecycle, recovery, tool readiness/delivery, correlated tool results, and tool-bearing replay events.
-- `debug`: state transitions, all replay events, and periodic progress snapshots.
+- `warn`: stalls, loops, cancellations, rejected requests, Tool argument growth thresholds, and retries of previously failed requests.
+- `info`: request lifecycle, recovery, Tool readiness/delivery, latest-turn Tool results, and replay events.
+- `debug`: state transitions, periodic progress, exact-request retry fingerprints, and full-history versus latest-turn Tool Result context.
 - `trace`: transport chunk metadata and optional redacted payload previews.
 
-Normal operation should use `info`. Use `debug` while diagnosing long reasoning or tool-loop waits. `trace` is intended for short controlled reproductions.
+Normal operation should use `info`. Use `debug` while diagnosing long reasoning or Tool-loop waits. Use `trace` only for short controlled reproductions.
 
 ## Progress interpretation
 
@@ -22,7 +22,7 @@ sseEvents
 → complete protocol events are being parsed
 
 semanticBytes
-→ reasoning, content, tool-name, or tool-argument bytes are increasing
+→ reasoning, content, Tool-name, or Tool-argument bytes are increasing
 ```
 
 Common patterns:
@@ -58,11 +58,52 @@ toolArgumentFragmentsByCall
 parallelToolCallsDetected
 ```
 
-For Chat Completions, a continuation fragment that omits `index` is attached to the active Tool Call instead of being counted as a new call. Per-call keys use `choice:<choice>/tool:<index>`. Responses use `output:<index>/call:<id>`, and Anthropic uses `block:<index>`.
+For Chat Completions, a continuation fragment that omits `index` is attached to the active Tool Call. A fragment carrying a new Tool Call `id` still creates a new call. Per-call keys use `choice:<choice>/tool:<index>`. Responses use `output:<index>/call:<id>`, and Anthropic uses `block:<index>`.
 
-## Hermes tool round-trip
+## Completion and usage diagnostics
 
-The expected sequence is:
+Progress and terminal records normalize the upstream completion boundary:
+
+- Chat Completions: `finishReason`, `finishReasonsByChoice`, `doneReceived`.
+- Responses: `responseCompleted`, `responseFailed`, `responseStatus`.
+- Anthropic Messages: `messageStopped`, `stopReason`.
+- All protocols expose normalized `usagePromptTokens`, `usageCompletionTokens`, and `usageTotalTokens` when the upstream provides them.
+
+Use these fields to distinguish:
+
+```text
+finishReason="length"
+→ likely token-limit truncation
+
+finishReason="tool_calls" + malformed Tool JSON
+→ model/parser declared a Tool boundary but produced invalid arguments
+
+doneReceived=false or no protocol completion marker
+→ inspect stream termination and parser completion
+```
+
+## Tool argument growth thresholds
+
+Configuration:
+
+```text
+TOOL_ARGUMENT_WARNING_BYTES=8192
+TOOL_ARGUMENT_CRITICAL_BYTES=16384
+MAX_TOOL_ARGUMENT_BYTES=8388608
+```
+
+Warning and critical thresholds are diagnostic only. Each attempt/Tool Call emits each event at most once:
+
+```text
+tool_argument_growth_warning
+tool_argument_growth_critical
+```
+
+The hard rejection limit remains `MAX_TOOL_ARGUMENT_BYTES`. Threshold events include Tool identity, argument bytes, fragments, attempt, and phase; they never include the payload.
+
+## Hermes Tool round-trip
+
+Expected successful sequence:
 
 ```text
 tool_calls_ready
@@ -72,38 +113,57 @@ tool_calls_delivered
 request_completed
 ```
 
-A later Hermes request should contain:
+A later Hermes request is split into two views:
 
 ```text
+tool_result_context
+  historyCount=...
+  latestTurnCount=...
+  correlatedCount=...
+
 tool_results_received
-parentRequestIds=[source request ID]
-toolCallIds=[call ID]
-toolRoundTripMs=...
+  count=<latest-turn only>
+  historyCount=<full history>
+  parentRequestIds=[...]
+  toolRoundTripMs=...
 ```
 
 Interpretation:
 
-- `tool_calls_ready` without `response_replay_completed`: the proxy did not finish replaying the protected response.
-- `tool_calls_delivered` without a later correlated `tool_results_received`: Node finished writing the response, but Hermes did not submit the next tool-result request before the correlation TTL expired.
-- Correlated `tool_results_received`, followed by `upstream_waiting_first_byte`: Hermes completed the tool round-trip and the proxy is waiting on vLLM.
-- Correlated `tool_results_received`, followed by active semantic progress: the next model generation is operating normally.
+- `tool_calls_ready` without `response_replay_completed`: protected replay did not finish.
+- `tool_calls_delivered` without a later correlated latest-turn result: Node finished writing, but Hermes did not submit the next Tool Result request before correlation expiry.
+- `historyCount > 0` and `latestTurnCount = 0`: old Tool Results are merely present in conversation history; no new Tool Result was submitted in this request.
+- Correlated latest-turn results followed by `upstream_waiting_first_byte`: Hermes completed the Tool round-trip and the Proxy is waiting on vLLM.
+- Correlated latest-turn results followed by semantic progress: the next generation is operating normally.
 
-`tool_calls_delivered` is based on Node's response `finish` event. It is not a Hermes application-level acknowledgement. A correlated tool-result request is the strongest available acknowledgement.
+`tool_calls_delivered` is based on Node's response `finish` event, not a Hermes acknowledgement. A correlated latest-turn Tool Result request is the strongest available acknowledgement.
 
-## Data safety
+## Client retry diagnosis
 
-Tool arguments and results are excluded by default. With both conditions below:
+The Proxy hashes the guarded API path plus exact raw request body. A byte-identical request repeated within `CLIENT_RETRY_FINGERPRINT_TTL_MS` emits:
 
 ```text
-LOG_LEVEL=trace
-LOG_TOOL_PAYLOADS=true
+client_retry_detected
+previousRequestId=...
+previousTerminalEvent=...
+previousFailureReason=...
+previousRetryable=...
+retryDelayMs=...
+retryOrdinal=...
 ```
 
-The proxy emits a truncated preview and redacts common credential keys. This mode can still expose project data and should only be used for controlled debugging.
+Only the first 16 hex characters of the SHA-256 fingerprint are logged. This mechanism intentionally does not correlate near-duplicate or semantically equivalent requests.
+
+Registry controls:
+
+```text
+CLIENT_RETRY_FINGERPRINT_TTL_MS=900000
+CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES=10000
+```
 
 ## Malformed Tool argument diagnostics
 
-Deterministic Tool JSON failures are logged with `retryable:false` and safe fields such as:
+Deterministic Tool JSON failures are logged with `retryable:false` and payload-safe fields:
 
 ```text
 toolCallCount
@@ -115,8 +175,52 @@ toolArgumentBytes
 toolArgumentFragments
 parseErrorCategory
 parseErrorOffset
+parseErrorOffsetUnit="utf16_code_unit"
 parseErrorLine
 parseErrorColumn
+toolArgumentUtf8Bytes
+toolArgumentUtf16Length
+toolArgumentCodePoints
+parseErrorAtEnd
 ```
 
-The full Tool arguments are not included. `malformed_tool_arguments` and equivalent Anthropic/Responses failures bypass generic Proxy Recovery to avoid repeating the same invalid generation inside the Proxy.
+`parseErrorOffset` comes from JavaScript's JSON parser and is not a UTF-8 byte offset. The separate length fields prevent incorrect direct comparison. Full Tool arguments are never included at normal levels.
+
+Malformed, invalid, oversized, and excessive Tool structures bypass generic Proxy Recovery. They require a changed generation strategy rather than blind regeneration.
+
+## Metrics
+
+Each protocol exposes counters such as:
+
+```text
+<protocol>_client_retries_detected_total
+<protocol>_tool_argument_warnings_total
+<protocol>_tool_argument_critical_total
+```
+
+For the current metric prefixes:
+
+```text
+vllm_openai_proxy_...
+vllm_cc_proxy_...
+```
+
+Use `/metrics`, `/metrics/openai`, or `/metrics/cc`.
+
+## Buffer fields
+
+- `globalBufferUtilizationRatio`: value from `0` to `1`.
+- `globalBufferUtilizationPercent`: percentage from `0` to `100`.
+- `globalBufferUtilization`: legacy ratio retained for compatibility.
+- `estimatedRequestMemoryBytes`: diagnostic estimate, not exact V8 heap accounting.
+
+## Data safety
+
+Tool arguments and results are excluded by default. Only when both are enabled:
+
+```text
+LOG_LEVEL=trace
+LOG_TOOL_PAYLOADS=true
+```
+
+the Proxy emits a truncated preview with common credential fields redacted. This can still expose project data and should only be used for controlled debugging.

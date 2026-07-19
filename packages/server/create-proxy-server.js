@@ -38,6 +38,10 @@ function createMetrics() {
     clientRetriesDetectedTotal: 0,
     toolArgumentWarningsTotal: 0,
     toolArgumentCriticalTotal: 0,
+    toolPassthroughStartedTotal: 0,
+    toolPassthroughCompletedTotal: 0,
+    toolPassthroughInterruptionsTotal: 0,
+    toolPassthroughValidationWarningsTotal: 0,
   };
 }
 
@@ -166,6 +170,11 @@ function endResponseAndWait(response, body = null) {
   });
 }
 
+async function writeResponseChunk(response, chunk) {
+  if (response.destroyed || response.writableEnded) throw new Error('response_not_writable');
+  if (!response.write(chunk)) await once(response, 'drain');
+}
+
 async function sendBufferedSuccess(response, attempt) {
   if (!response.headersSent) {
     response.writeHead(attempt.status || 200, copyResponseHeaders(attempt.headers, { bodyLength: attempt.rawBody.length }));
@@ -220,9 +229,11 @@ function toolLogEntries(toolCalls, config, includePayload) {
     const name = tool.name || tool.function?.name || 'unknown';
     const id = tool.id || tool.call_id || null;
     const rawArguments = tool.arguments ?? tool.function?.arguments ?? tool.parsedArguments ?? null;
-    const argumentBytes = typeof rawArguments === 'string'
-      ? Buffer.byteLength(rawArguments, 'utf8')
-      : Buffer.byteLength(JSON.stringify(rawArguments ?? {}), 'utf8');
+    const argumentBytes = Number.isFinite(Number(tool.argumentBytes))
+      ? Number(tool.argumentBytes)
+      : (typeof rawArguments === 'string'
+        ? Buffer.byteLength(rawArguments, 'utf8')
+        : Buffer.byteLength(JSON.stringify(rawArguments ?? {}), 'utf8'));
     return {
       name,
       id,
@@ -348,6 +359,9 @@ export function createProtocolProxyRuntime({
           previousFailureKind: previousFields.kind || null,
           previousRetryable: previousFields.retryable ?? null,
           retryDelayMs: retry.retryDelayMs,
+          retryDelayAfterTerminalMs: retry.retryDelayAfterTerminalMs,
+          previousRequestDurationMs: retry.previousRequestDurationMs,
+          requestStartIntervalMs: retry.requestStartIntervalMs,
           retryOrdinal: retry.retryOrdinal,
         };
         const retryLevel = !retry.previousTerminalEvent || ['request_failed', 'request_cancelled'].includes(retry.previousTerminalEvent) ? 'warn' : 'debug';
@@ -399,6 +413,45 @@ export function createProtocolProxyRuntime({
       }
       const streaming = Boolean(firstBody.stream);
       const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
+      let toolPassthroughDelivery = null;
+      const createToolPassthrough = (attemptNumber, phase) => {
+        if (!route.transparentToolPassthrough) return null;
+        return {
+          shouldCommit(_snapshot, semanticMetrics) {
+            return (semanticMetrics?.toolCallCount || 0) > 0;
+          },
+          async start({ status, headers, bufferedBody, semanticMetrics }) {
+            heartbeat?.stop();
+            metrics.toolPassthroughStartedTotal += 1;
+            toolPassthroughDelivery = {
+              attempt: attemptNumber,
+              phase,
+              startedAtMono: performance.now(),
+              bufferedBytes: bufferedBody.length,
+            };
+            if (!response.headersSent) response.writeHead(status || 200, copyResponseHeaders(headers));
+            requestLogger.info('tool_passthrough_started', {
+              attempt: attemptNumber,
+              phase,
+              bufferedBytes: bufferedBody.length,
+              toolCallCount: semanticMetrics?.toolCallCount || 0,
+              toolCallIds: semanticMetrics?.toolCallIds || [],
+              toolNames: semanticMetrics?.toolNames || [],
+              validationMode: 'observe_only',
+            });
+            await writeResponseChunk(response, bufferedBody);
+          },
+          async write(chunk) {
+            await writeResponseChunk(response, chunk);
+          },
+          async end() {
+            await endResponseAndWait(response);
+          },
+          async abort({ error }) {
+            if (!response.destroyed && !response.writableEnded) response.destroy(error instanceof Error ? error : undefined);
+          },
+        };
+      };
       let lastTransportWarningAtMono = 0;
       let lastSemanticWarningAtMono = 0;
       const emittedToolGrowthWarnings = new Set();
@@ -473,6 +526,7 @@ export function createProtocolProxyRuntime({
         timeoutMs: config.totalGenerationTimeoutMs,
         observer: makeObserver(1, 'initial'),
         attemptNumber: 1,
+        toolPassthrough: createToolPassthrough(1, 'initial'),
       });
       if (attempt.kind === 'success' && route.validateAttempt) {
         const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody, config });
@@ -497,7 +551,7 @@ export function createProtocolProxyRuntime({
         return;
       }
 
-      if (attempt.kind !== 'success' && config.maxRecoveryAttempts > 0 && recoverable(attempt)) {
+      if (attempt.kind !== 'success' && attempt.kind !== 'tool_passthrough' && !attempt.deliveryCommitted && config.maxRecoveryAttempts > 0 && recoverable(attempt)) {
         metrics.recoveriesTotal += 1;
         requestLogger.info('recovery_started', {
           fromKind: attempt.kind,
@@ -528,6 +582,7 @@ export function createProtocolProxyRuntime({
           timeoutMs: config.recoveryTimeoutMs,
           observer: makeObserver(2, 'recovery'),
           attemptNumber: 2,
+          toolPassthrough: createToolPassthrough(2, 'recovery'),
         });
         if (attempt.kind === 'success' && route.validateAttempt) {
           const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody: recovery.body, config, recovery: true });
@@ -546,13 +601,92 @@ export function createProtocolProxyRuntime({
           const recoveryValidation = route.validateRecovery(attempt, recovery);
           if (!recoveryValidation.ok) attempt = { kind: 'invalid', ...recoveryValidation, result: attempt.result };
         }
-        if (attempt.kind === 'success') {
+        if (attempt.kind === 'success' || attempt.kind === 'tool_passthrough') {
           metrics.recoverySuccessTotal += 1;
           requestLogger.info('recovery_completed', { elapsedMs: elapsedMs() });
         }
       }
 
       heartbeat?.stop();
+      if (attempt.kind === 'tool_passthrough') {
+        const output = route.adapter.extractOutput?.(attempt.result) || { toolCalls: [], finalText: '' };
+        const toolCalls = Array.isArray(output.toolCalls) ? output.toolCalls : [];
+        const validation = streaming
+          ? route.adapter.validateStream?.(attempt.result, config)
+          : route.adapter.validateJson?.(attempt.result, config);
+        if (validation && !validation.ok) {
+          metrics.toolPassthroughValidationWarningsTotal += 1;
+          requestLogger.warn('tool_passthrough_validation_warning', {
+            reason: validation.reason || 'semantic_validation_failed',
+            detail: validation.detail || null,
+            retryable: validation.retryable ?? false,
+            action: 'observe_only',
+            ...(validation.diagnostics || {}),
+          });
+        }
+
+        if (!attempt.deliveryCommitted) {
+          metrics.toolPassthroughStartedTotal += 1;
+          toolPassthroughDelivery = {
+            attempt: attempt.attemptNumber || 1,
+            phase: (attempt.attemptNumber || 1) > 1 ? 'recovery' : 'initial',
+            startedAtMono: performance.now(),
+            bufferedBytes: attempt.rawBody?.length || 0,
+          };
+          requestLogger.info('tool_passthrough_started', {
+            attempt: attempt.attemptNumber || 1,
+            phase: (attempt.attemptNumber || 1) > 1 ? 'recovery' : 'initial',
+            bufferedBytes: attempt.rawBody?.length || 0,
+            toolCallCount: toolCalls.length,
+            toolCallIds: toolCalls.map((tool) => tool.id || tool.call_id).filter(Boolean),
+            toolNames: toolCalls.map((tool) => tool.name || tool.function?.name || 'unknown'),
+            validationMode: 'observe_only',
+            streaming: false,
+          });
+          try {
+            await sendBufferedSuccess(response, attempt);
+          } catch (error) {
+            metrics.toolPassthroughInterruptionsTotal += 1;
+            terminal('request_failed', { kind: 'tool_passthrough_delivery_failed', reason: error instanceof Error ? error.message : String(error), deliveryCommitted: false }, 'error');
+            return;
+          }
+        }
+
+        metrics.toolPassthroughCompletedTotal += 1;
+        const deliveryDurationMs = toolPassthroughDelivery
+          ? Math.max(0, Math.round(performance.now() - toolPassthroughDelivery.startedAtMono))
+          : 0;
+        requestLogger.info('tool_passthrough_completed', {
+          attempt: toolPassthroughDelivery?.attempt || 1,
+          phase: toolPassthroughDelivery?.phase || 'initial',
+          upstreamBytes: attempt.upstreamBytes ?? attempt.rawBody?.length ?? 0,
+          bufferedBytesAtCommit: attempt.bufferedBytesAtCommit ?? toolPassthroughDelivery?.bufferedBytes ?? 0,
+          deliveryDurationMs,
+          toolCallCount: toolCalls.length,
+          validationMode: 'observe_only',
+          observationError: attempt.observationError || null,
+          ...(route.adapter.completionDiagnostics?.(attempt.result) || {}),
+        });
+        if (toolCalls.length > 0) {
+          correlations.register(requestId, toolCalls);
+          requestLogger.info('tool_calls_delivered', {
+            count: toolCalls.length,
+            tools: toolLogEntries(toolCalls, config, false),
+            validationMode: 'observe_only',
+          });
+        }
+        terminal('request_completed', {
+          mode: 'tool_passthrough',
+          status: attempt.status || 200,
+          upstreamBytes: attempt.upstreamBytes ?? attempt.rawBody?.length ?? 0,
+          toolCallCount: toolCalls.length,
+          finalTextChars: typeof output.finalText === 'string' ? output.finalText.length : 0,
+          deliveryCommitted: Boolean(attempt.deliveryCommitted),
+          deliveryDurationMs,
+          ...(route.adapter.completionDiagnostics?.(attempt.result) || {}),
+        });
+        return;
+      }
       if (attempt.kind === 'success') {
         const output = route.adapter.extractOutput?.(attempt.result) || { toolCalls: [], finalText: '' };
         const toolCalls = Array.isArray(output.toolCalls) ? output.toolCalls : [];
@@ -597,6 +731,17 @@ export function createProtocolProxyRuntime({
       }
       if (attempt.kind === 'cancelled') {
         terminal('request_cancelled', { reason: attempt.reason || 'client_cancelled' }, 'warn');
+        return;
+      }
+      if (attempt.deliveryCommitted) {
+        metrics.toolPassthroughInterruptionsTotal += 1;
+        const failureFields = attemptFailureFields(attempt);
+        terminal('request_failed', {
+          kind: attempt.kind,
+          reason: attempt.reason || attempt.loopInfo?.reason || 'tool_passthrough_interrupted',
+          deliveryCommitted: true,
+          ...failureFields,
+        }, 'error');
         return;
       }
       metrics.validationFailuresTotal += 1;

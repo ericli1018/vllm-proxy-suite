@@ -44,11 +44,21 @@ export class RequestFingerprintRegistry {
     });
     this.#prune(now);
     if (!previous) return null;
+    const requestStartIntervalMs = Math.max(0, Math.round(now - previous.observedAtMono));
+    const retryDelayAfterTerminalMs = Number.isFinite(previous.completedAtMono)
+      ? Math.max(0, Math.round(now - previous.completedAtMono))
+      : null;
+    const previousRequestDurationMs = Number.isFinite(previous.completedAtMono)
+      ? Math.max(0, Math.round(previous.completedAtMono - previous.observedAtMono))
+      : null;
     return {
       previousRequestId: previous.requestId,
       previousTerminalEvent: previous.terminalEvent,
       previousTerminalFields: previous.terminalFields,
-      retryDelayMs: Math.max(0, Math.round(now - previous.observedAtMono)),
+      retryDelayMs: retryDelayAfterTerminalMs ?? requestStartIntervalMs,
+      retryDelayAfterTerminalMs,
+      previousRequestDurationMs,
+      requestStartIntervalMs,
       retryOrdinal,
     };
   }

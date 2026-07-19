@@ -30,7 +30,24 @@ function createToolCall(index) {
     argumentFragmentCount: 0,
     nameBytes: 0,
     argumentBytes: 0,
+    argumentsRetainedBytes: 0,
+    argumentsObservationTruncated: false,
   };
+}
+
+
+function utf8Prefix(value, maxBytes) {
+  if (!Number.isFinite(maxBytes)) return String(value || '');
+  const limit = Math.max(0, Math.floor(maxBytes));
+  let output = '';
+  let bytes = 0;
+  for (const character of String(value || '')) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (bytes + characterBytes > limit) break;
+    output += character;
+    bytes += characterBytes;
+  }
+  return output;
 }
 
 function contentDeltaText(value) {
@@ -65,7 +82,7 @@ function resolveToolCallIndex(choice, delta, position, deltaCount) {
   return nextToolCallIndex(choice);
 }
 
-function absorbToolCalls(choice, toolCalls) {
+function absorbToolCalls(choice, toolCalls, observationMaxBytes = null) {
   let toolNameBytes = 0;
   let toolArgumentBytes = 0;
   if (!Array.isArray(toolCalls)) return { toolNameBytes, toolArgumentBytes };
@@ -83,7 +100,17 @@ function absorbToolCalls(choice, toolCalls) {
     }
     if (typeof delta?.function?.arguments === 'string') {
       const argumentBytes = Buffer.byteLength(delta.function.arguments, 'utf8');
-      tool.arguments += delta.function.arguments;
+      if (Number.isFinite(observationMaxBytes)) {
+        const remainingBytes = Math.max(0, observationMaxBytes - tool.argumentsRetainedBytes);
+        const retainedFragment = utf8Prefix(delta.function.arguments, remainingBytes);
+        const retainedFragmentBytes = Buffer.byteLength(retainedFragment, 'utf8');
+        tool.arguments += retainedFragment;
+        tool.argumentsRetainedBytes += retainedFragmentBytes;
+        if (retainedFragmentBytes < argumentBytes) tool.argumentsObservationTruncated = true;
+      } else {
+        tool.arguments += delta.function.arguments;
+        tool.argumentsRetainedBytes += argumentBytes;
+      }
       tool.argumentFragmentCount += 1;
       tool.argumentBytes += argumentBytes;
       toolArgumentBytes += argumentBytes;
@@ -97,6 +124,21 @@ function absorbToolCalls(choice, toolCalls) {
 function finalizeTools(choices) {
   for (const choice of choices.values()) {
     for (const tool of choice.toolCalls.values()) {
+      if (tool.argumentsObservationTruncated) {
+        tool.parsedArguments = null;
+        tool.argumentError = null;
+        tool.argumentErrorDiagnostics = {
+          parseErrorCategory: 'observation_truncated',
+          parseErrorOffset: null,
+          parseErrorLine: null,
+          parseErrorColumn: null,
+          parseErrorOffsetUnit: null,
+          toolArgumentUtf8Bytes: tool.argumentBytes,
+          toolArgumentRetainedBytes: tool.argumentsRetainedBytes,
+          toolArgumentObservationTruncated: true,
+        };
+        continue;
+      }
       try {
         tool.parsedArguments = JSON.parse(tool.arguments || '{}');
         tool.argumentError = null;
@@ -123,6 +165,8 @@ function collectToolDiagnostics(choices) {
         argumentBytes: tool.argumentBytes || 0,
         argumentFragments: tool.argumentFragmentCount || 0,
         nameFragments: tool.nameFragmentCount || 0,
+        argumentRetainedBytes: tool.argumentsRetainedBytes ?? Buffer.byteLength(tool.arguments || '', 'utf8'),
+        argumentsObservationTruncated: Boolean(tool.argumentsObservationTruncated),
       });
     }
   }
@@ -177,7 +221,7 @@ function withCompletionDiagnostics(result, validation) {
 }
 
 class ChatCompletionsStreamParser {
-  constructor() {
+  constructor(config = {}) {
     this.decoder = new SseFrameDecoder();
     this.done = false;
     this.error = null;
@@ -189,6 +233,27 @@ class ChatCompletionsStreamParser {
     this.contentBytes = 0;
     this.toolNameBytes = 0;
     this.toolArgumentBytes = 0;
+    this.toolPassthroughObservationOnly = false;
+    this.toolPassthroughObservationMaxBytes = Number.isFinite(config.toolPassthroughObservationMaxBytes)
+      ? Math.max(0, config.toolPassthroughObservationMaxBytes)
+      : 64 * 1024;
+  }
+
+  enableToolPassthroughObservation(maxBytes = this.toolPassthroughObservationMaxBytes) {
+    this.toolPassthroughObservationOnly = true;
+    this.toolPassthroughObservationMaxBytes = Number.isFinite(maxBytes) ? Math.max(0, maxBytes) : this.toolPassthroughObservationMaxBytes;
+    for (const choice of this.choices.values()) {
+      for (const tool of choice.toolCalls.values()) {
+        const previousRetainedBytes = tool.argumentsRetainedBytes;
+        const retained = utf8Prefix(tool.arguments, this.toolPassthroughObservationMaxBytes);
+        const retainedBytes = Buffer.byteLength(retained, 'utf8');
+        if (retainedBytes < previousRetainedBytes || tool.argumentBytes > retainedBytes) {
+          tool.argumentsObservationTruncated = true;
+        }
+        tool.arguments = retained;
+        tool.argumentsRetainedBytes = retainedBytes;
+      }
+    }
   }
 
   push(chunk) {
@@ -233,7 +298,11 @@ class ChatCompletionsStreamParser {
         choice.reasoning += delta.reasoning_content;
         this.reasoningBytes += Buffer.byteLength(delta.reasoning_content, 'utf8');
       }
-      const toolDelta = absorbToolCalls(choice, delta.tool_calls);
+      const toolDelta = absorbToolCalls(
+        choice,
+        delta.tool_calls,
+        this.toolPassthroughObservationOnly ? this.toolPassthroughObservationMaxBytes : null,
+      );
       this.toolNameBytes += toolDelta.toolNameBytes;
       this.toolArgumentBytes += toolDelta.toolArgumentBytes;
       if (item?.finish_reason !== undefined && item.finish_reason !== null) choice.finishReason = item.finish_reason;
@@ -293,6 +362,7 @@ function validateChoices(choices, config) {
     if (choice.toolCalls.size > 0 && choice.finishReason !== 'tool_calls') return invalid('tool_finish_reason_mismatch');
     for (const [toolIndex, tool] of choice.toolCalls.entries()) {
       if (!tool.name) return invalid('missing_tool_name');
+      if (tool.argumentsObservationTruncated) continue;
       if (Buffer.byteLength(tool.arguments || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit', 'tool_argument_limit', { retryable: false, diagnostics: malformedToolDiagnostics(choices, choiceIndex, toolIndex, tool) });
       if (tool.argumentError) {
         return invalid('malformed_tool_arguments', tool.argumentError, {
@@ -335,7 +405,7 @@ function normalizeNonStream(payload) {
 export const chatCompletionsAdapter = Object.freeze({
   id: 'openai_chat_completions',
   path: '/v1/chat/completions',
-  createStreamParser() { return new ChatCompletionsStreamParser(); },
+  createStreamParser(config) { return new ChatCompletionsStreamParser(config); },
   getReasoning(result) { return [...result.choices.values()].map((choice) => choice.reasoning).filter(Boolean); },
   completionDiagnostics(result) { return collectCompletionDiagnostics(result); },
   semanticMetrics(result) {

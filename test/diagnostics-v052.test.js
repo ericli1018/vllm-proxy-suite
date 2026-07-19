@@ -262,11 +262,13 @@ test('config exposes Tool growth and client retry fingerprint controls', () => {
   const config = loadCommonConfig({
     TOOL_ARGUMENT_WARNING_BYTES: '8192', TOOL_ARGUMENT_CRITICAL_BYTES: '16384',
     CLIENT_RETRY_FINGERPRINT_TTL_MS: '120000', CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES: '1234',
+    TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES: '0',
   });
   assert.equal(config.toolArgumentWarningBytes, 8192);
   assert.equal(config.toolArgumentCriticalBytes, 16384);
   assert.equal(config.clientRetryFingerprintTtlMs, 120000);
   assert.equal(config.clientRetryFingerprintMaxEntries, 1234);
+  assert.equal(config.toolPassthroughObservationMaxBytes, 0);
   const normalized = loadCommonConfig({ TOOL_ARGUMENT_WARNING_BYTES: '8192', TOOL_ARGUMENT_CRITICAL_BYTES: '4096' });
   assert.equal(normalized.toolArgumentCriticalBytes, 8192);
 });

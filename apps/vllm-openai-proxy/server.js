@@ -31,6 +31,7 @@ export function isOpenAiPassthroughPath(path) {
 function createRoute(adapter, api, config) {
   return {
     adapter,
+    transparentToolPassthrough: true,
     prepareRequest(body) {
       return structuredClone(body);
     },

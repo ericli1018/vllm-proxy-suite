@@ -6,11 +6,40 @@ function invalid(reason, detail = reason, extra = {}) {
 }
 
 function createFunctionCall(id, index = 0) {
-  return { id, index, name: '', arguments: '', parsedArguments: null, argumentError: null, argumentErrorDiagnostics: null, nameFragmentCount: 0, argumentFragmentCount: 0, nameBytes: 0, argumentBytes: 0 };
+  return { id, index, name: '', arguments: '', parsedArguments: null, argumentError: null, argumentErrorDiagnostics: null, nameFragmentCount: 0, argumentFragmentCount: 0, nameBytes: 0, argumentBytes: 0, argumentsRetainedBytes: 0, argumentsObservationTruncated: false };
+}
+
+function utf8Prefix(value, maxBytes) {
+  if (!Number.isFinite(maxBytes)) return String(value || '');
+  const limit = Math.max(0, Math.floor(maxBytes));
+  let output = '';
+  let bytes = 0;
+  for (const character of String(value || '')) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (bytes + characterBytes > limit) break;
+    output += character;
+    bytes += characterBytes;
+  }
+  return output;
 }
 
 function finalizeCalls(calls) {
   for (const call of calls.values()) {
+    if (call.argumentsObservationTruncated) {
+      call.parsedArguments = null;
+      call.argumentError = null;
+      call.argumentErrorDiagnostics = {
+        parseErrorCategory: 'observation_truncated',
+        parseErrorOffset: null,
+        parseErrorLine: null,
+        parseErrorColumn: null,
+        parseErrorOffsetUnit: null,
+        toolArgumentUtf8Bytes: call.argumentBytes,
+        toolArgumentRetainedBytes: call.argumentsRetainedBytes,
+        toolArgumentObservationTruncated: true,
+      };
+      continue;
+    }
     try {
       call.parsedArguments = JSON.parse(call.arguments || '{}');
       call.argumentError = null;
@@ -32,6 +61,8 @@ function collectFunctionCallDiagnostics(functionCalls) {
     argumentBytes: call.argumentBytes || 0,
     argumentFragments: call.argumentFragmentCount || 0,
     nameFragments: call.nameFragmentCount || 0,
+    argumentRetainedBytes: call.argumentsRetainedBytes ?? Buffer.byteLength(call.arguments || '', 'utf8'),
+    argumentsObservationTruncated: Boolean(call.argumentsObservationTruncated),
   })).sort((a, b) => a.index - b.index || a.key.localeCompare(b.key));
   return {
     toolCallCount: toolCalls.length,
@@ -94,7 +125,7 @@ function malformedCallDiagnostics(functionCalls, call) {
 }
 
 class ResponsesStreamParser {
-  constructor() {
+  constructor(config = {}) {
     this.decoder = new SseFrameDecoder();
     this.completed = false;
     this.failed = false;
@@ -109,6 +140,65 @@ class ResponsesStreamParser {
     this.contentBytes = 0;
     this.toolNameBytes = 0;
     this.toolArgumentBytes = 0;
+    this.toolPassthroughObservationOnly = false;
+    this.toolPassthroughObservationMaxBytes = Number.isFinite(config.toolPassthroughObservationMaxBytes)
+      ? Math.max(0, config.toolPassthroughObservationMaxBytes)
+      : 64 * 1024;
+  }
+
+  enableToolPassthroughObservation(maxBytes = this.toolPassthroughObservationMaxBytes) {
+    this.toolPassthroughObservationOnly = true;
+    this.toolPassthroughObservationMaxBytes = Number.isFinite(maxBytes) ? Math.max(0, maxBytes) : this.toolPassthroughObservationMaxBytes;
+    for (const call of this.functionCalls.values()) {
+      const retained = utf8Prefix(call.arguments, this.toolPassthroughObservationMaxBytes);
+      if (Buffer.byteLength(retained, 'utf8') < Buffer.byteLength(call.arguments || '', 'utf8') || call.argumentBytes > Buffer.byteLength(retained, 'utf8')) {
+        call.argumentsObservationTruncated = true;
+      }
+      call.arguments = retained;
+      call.argumentsRetainedBytes = Buffer.byteLength(retained, 'utf8');
+    }
+  }
+
+  #replaceArguments(call, value) {
+    const text = String(value || '');
+    const totalBytes = Buffer.byteLength(text, 'utf8');
+    if (this.toolPassthroughObservationOnly) {
+      const previousBytes = call.argumentBytes || 0;
+      const deltaBytes = Math.max(0, totalBytes - previousBytes);
+      if (deltaBytes > 0) call.argumentFragmentCount += 1;
+      call.argumentBytes = Math.max(previousBytes, totalBytes);
+      this.toolArgumentBytes += deltaBytes;
+      call.arguments = utf8Prefix(text, this.toolPassthroughObservationMaxBytes);
+      call.argumentsRetainedBytes = Buffer.byteLength(call.arguments, 'utf8');
+      if (call.argumentsRetainedBytes < totalBytes) call.argumentsObservationTruncated = true;
+      return;
+    }
+    const previousRetainedBytes = call.argumentsRetainedBytes;
+    const deltaBytes = Math.max(0, totalBytes - previousRetainedBytes);
+    if (deltaBytes > 0) call.argumentFragmentCount += 1;
+    this.toolArgumentBytes += deltaBytes;
+    call.arguments = text;
+    call.argumentBytes = totalBytes;
+    call.argumentsRetainedBytes = totalBytes;
+  }
+
+  #appendArguments(call, value) {
+    const text = String(value || '');
+    const argumentBytes = Buffer.byteLength(text, 'utf8');
+    call.argumentFragmentCount += 1;
+    call.argumentBytes += argumentBytes;
+    this.toolArgumentBytes += argumentBytes;
+    if (this.toolPassthroughObservationOnly) {
+      const remainingBytes = Math.max(0, this.toolPassthroughObservationMaxBytes - call.argumentsRetainedBytes);
+      const retained = utf8Prefix(text, remainingBytes);
+      const retainedBytes = Buffer.byteLength(retained, 'utf8');
+      call.arguments += retained;
+      call.argumentsRetainedBytes += retainedBytes;
+      if (retainedBytes < argumentBytes) call.argumentsObservationTruncated = true;
+    } else {
+      call.arguments += text;
+      call.argumentsRetainedBytes += argumentBytes;
+    }
   }
 
   push(chunk) {
@@ -165,13 +255,7 @@ class ResponsesStreamParser {
           call.name = item.name;
           call.nameBytes = Buffer.byteLength(item.name, 'utf8');
         }
-        if (typeof item.arguments === 'string') {
-          const argumentDeltaBytes = Math.max(0, Buffer.byteLength(item.arguments, 'utf8') - Buffer.byteLength(call.arguments || '', 'utf8'));
-          this.toolArgumentBytes += argumentDeltaBytes;
-          if (argumentDeltaBytes > 0) call.argumentFragmentCount += 1;
-          call.arguments = item.arguments;
-          call.argumentBytes = Buffer.byteLength(item.arguments, 'utf8');
-        }
+        if (typeof item.arguments === 'string') this.#replaceArguments(call, item.arguments);
         this.functionCalls.set(id, call);
       }
       return;
@@ -179,13 +263,7 @@ class ResponsesStreamParser {
     if (type === 'response.function_call_arguments.delta') {
       const id = payload.item_id || payload.call_id || String(payload.output_index ?? 0);
       const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0);
-      if (typeof payload.delta === 'string') {
-        const argumentBytes = Buffer.byteLength(payload.delta, 'utf8');
-        call.arguments += payload.delta;
-        call.argumentFragmentCount += 1;
-        call.argumentBytes += argumentBytes;
-        this.toolArgumentBytes += argumentBytes;
-      }
+      if (typeof payload.delta === 'string') this.#appendArguments(call, payload.delta);
       this.functionCalls.set(id, call);
       return;
     }
@@ -200,13 +278,7 @@ class ResponsesStreamParser {
           call.name = item.name;
           call.nameBytes = Buffer.byteLength(item.name, 'utf8');
         }
-        if (typeof item.arguments === 'string') {
-          const argumentDeltaBytes = Math.max(0, Buffer.byteLength(item.arguments, 'utf8') - Buffer.byteLength(call.arguments || '', 'utf8'));
-          this.toolArgumentBytes += argumentDeltaBytes;
-          if (argumentDeltaBytes > 0) call.argumentFragmentCount += 1;
-          call.arguments = item.arguments;
-          call.argumentBytes = Buffer.byteLength(item.arguments, 'utf8');
-        }
+        if (typeof item.arguments === 'string') this.#replaceArguments(call, item.arguments);
         this.functionCalls.set(id, call);
       }
     }
@@ -284,6 +356,7 @@ function validateResult(result, config, requireCompleted) {
   if (result.functionCalls.size > config.maxToolCalls) return invalid('too_many_tool_calls', 'too_many_tool_calls', { retryable: false, diagnostics: collectFunctionCallDiagnostics(result.functionCalls) });
   for (const call of result.functionCalls.values()) {
     if (!call.name) return invalid('missing_tool_name');
+    if (call.argumentsObservationTruncated) continue;
     if (Buffer.byteLength(call.arguments || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit', 'tool_argument_limit', { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
     if (call.argumentError) return invalid('malformed_tool_arguments', call.argumentError, { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
     if (!call.parsedArguments || typeof call.parsedArguments !== 'object' || Array.isArray(call.parsedArguments)) return invalid('invalid_tool_arguments', 'invalid_tool_arguments', { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
@@ -295,7 +368,7 @@ function validateResult(result, config, requireCompleted) {
 export const responsesAdapter = Object.freeze({
   id: 'openai_responses',
   path: '/v1/responses',
-  createStreamParser() { return new ResponsesStreamParser(); },
+  createStreamParser(config) { return new ResponsesStreamParser(config); },
   getReasoning(result) { return result.reasoning ? [result.reasoning] : []; },
   completionDiagnostics(result) { return collectCompletionDiagnostics(result); },
   semanticMetrics(result) {

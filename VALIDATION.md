@@ -1,34 +1,38 @@
-# VLLM-PROXY-SUITE v0.5.2 Validation
+# VLLM-PROXY-SUITE v0.5.3 Validation
 
 Validated in the artifact environment:
 
-- `npm test`: 103 tests passed, 0 failed.
-- `npm run check`: passed before packaging and repeated after clean ZIP extraction.
-- All production JavaScript files passed `node --check`.
-- Compose YAML parsed successfully and defines exactly one `vllm-proxy-suite` service on `3456:3456`.
+- `npm test`: 116 tests passed, 0 failed.
+- `npm run check`: passed.
+- Source and clean ZIP extraction both passed the full test suite and package validator.
+- All 41 JavaScript files passed `node --check`.
+- Package validator reports version `0.5.3`, 53 files, 26 required files, and `valid:true`.
+- Compose YAML parses successfully and defines exactly one `vllm-proxy-suite` service on `3456:3456`.
 - Compose startup shell passed `sh -n`.
-- Completion-boundary diagnostics expose Chat finish reasons/`[DONE]`, Responses status/completion, Anthropic stop state, and normalized usage where available.
-- Tool Result diagnostics separate full request history from trailing latest-turn Tool Results; only latest-turn results are logged as newly received and correlated.
-- Exact byte-identical retries are correlated through a bounded monotonic TTL registry and expose previous terminal outcome, delay, and retry ordinal.
-- Tool argument warning/critical thresholds emit at most once per attempt/Tool Call and do not log payload contents.
-- Prometheus counters report detected client retries and Tool argument warning/critical events per protocol.
-- Malformed Tool JSON reports explicit UTF-16 parse-offset units plus UTF-8, UTF-16, code-point, and end-of-input diagnostics.
-- Semantic counters exclude metadata, pings, usage and completion events.
-- Tool Call continuation fragments without a repeated Chat Completions `index` remain attached to the active call, while a new Tool Call ID still creates a distinct call.
-- Transport chunks and parsed SSE events are reported separately.
-- Request duration and rate calculations use a monotonic clock.
-- Response replay waits for Node `finish`; Buffer Budget remains reserved through replay.
-- Every logged `request_started` produces exactly one terminal lifecycle event.
-- Text logging escapes control characters and protects reserved record fields.
-- Optional Tool payload previews are trace-only, redacted and truncated.
-- The clean ZIP extraction is re-tested with the full test suite, package validator, and Gateway smoke test.
+- Single Gateway smoke passed `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`, combined `/metrics`, and graceful SIGTERM drain.
+- OpenAI Chat Completions and Responses commit buffered bytes at the first Tool Call and stream later upstream bytes before upstream completion.
+- OpenAI malformed Tool arguments remain in the original status-200 stream and produce observe-only diagnostics rather than Proxy failure or Recovery.
+- Non-stream OpenAI Tool responses bypass Tool argument validity gates unchanged after the complete JSON body is received.
+- Thinking Loop detection remains active before the OpenAI Tool commit boundary and is disabled after the irreversible commit.
+- Anthropic Messages and Claude Code Tool validation/recovery remain fail closed and retain protected replay behavior.
+- Heartbeat output stops before raw OpenAI Tool SSE commit.
+- Tool passthrough honors Node response backpressure and waits for response `finish` at normal completion.
+- Tool passthrough start/write/end failures are marked as committed interruptions and cannot trigger a second Recovery stream.
+- Tool argument observation is bounded by `TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES`; `0` retains no argument content while total bytes and fragments remain exact.
+- Chat Completions and Responses retained-byte counters remain incremental during long Tool streams.
+- Truncated diagnostic prefixes are not misclassified as complete invalid Tool JSON.
+- Progress distinguishes exact `parsedSemanticBytes` from bounded `parsedSemanticRetainedBytes`.
+- Exact-request retry timing separates delay after terminal, previous request duration, and request-start interval.
+- Prometheus output includes Tool passthrough start, completion, interruption, and observe-only validation warning counters.
+- Source and clean ZIP manifests are identical.
 
 Not validated in this environment:
 
-- Docker image/container execution.
-- Live Hermes → Gateway → vLLM integration.
-- Production load and long-duration throughput behavior.
-- Application-level acknowledgement that Hermes consumed bytes after Node emitted response `finish`.
+- Docker image/container build or execution.
+- Live Hermes → Gateway → vLLM, OpenAI SDK → Gateway → vLLM, or Claude Code → Gateway → vLLM integration.
+- Production load, long-duration throughput, and multi-client backpressure behavior.
+- Application-level acknowledgement that Hermes consumed Tool bytes after Node emitted response `finish`.
+- Whether a target model/client produces complete Tool arguments within its configured completion-token budget.
 
 ```bash
 node --version

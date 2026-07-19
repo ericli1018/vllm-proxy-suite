@@ -15,7 +15,7 @@ test('package validator confirms required deployable artifacts', () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.valid, true);
   assert.equal(report.project, 'VLLM-PROXY-SUITE');
-  assert.equal(report.version, '0.5.2');
+  assert.equal(report.version, '0.5.3');
   assert.equal(report.architecture, 'single-process-javascript-gateway');
   assert.equal(report.repository, 'https://github.com/ericli1018/vllm-proxy-suite.git');
   assert.ok(report.files >= 20);
@@ -28,6 +28,8 @@ test('README documents native path routing and separate protocol keys', () => {
   assert.match(readme, /VLLM_CC_PROXY_API_KEY/);
   assert.match(readme, /VLLM_OPENAI_PROXY_API_KEY/);
   assert.match(readme, /完整.*Attempt.*丟棄|整份.*Attempt.*丟棄/s);
+  assert.match(readme, /OpenAI Tool Passthrough/i);
+  assert.match(readme, /不可逆 commit boundary|irreversible Tool boundary/i);
   assert.match(readme, /Claude Code.*Tool Recovery/i);
   assert.match(readme, /no-op.*Edit|Edit.*no-op/i);
   assert.match(readme, /CLAUDE_CODE_TOOL_RECOVERY_ENABLED/);

@@ -1,6 +1,6 @@
 # Recovery Policy
 
-## Attempt lifecycle
+## Anthropic attempt lifecycle
 
 ```text
 ORIGINAL_ATTEMPT
@@ -12,32 +12,50 @@ ORIGINAL_ATTEMPT
     └── NOT RECOVERABLE → PROTOCOL ERROR
 ```
 
-`MAX_RECOVERY_ATTEMPTS` 被限制為 `0` 或 `1`。Recovery 永遠由原始 request 與已接受的歷史 Tool Result 建立，不把失敗 Attempt 寫回 context。
+## OpenAI attempt lifecycle
+
+```text
+ORIGINAL_ATTEMPT
+├── no Tool Call yet
+│   ├── VALID final response → protected replay
+│   └── INVALID／THINK LOOP／INTERRUPTED
+│       └── recoverable → at most one Recovery
+│
+└── first Tool Call observed
+    → irreversible transparent Tool commit
+    → no Tool validation gate
+    → no Tool repair or Recovery
+    → stream completion or committed-stream interruption
+```
+
+`MAX_RECOVERY_ATTEMPTS` is limited to `0` or `1`. Recovery always starts from the original request and accepted Tool Result history; a failed protected Attempt is not written into context.
+
+If an OpenAI Recovery generation emits a Tool Call, that Recovery response crosses the same transparent commit boundary. Post-generation forced-Tool validation cannot revoke bytes already delivered.
 
 ## OpenAI network capability
 
-Tool classifier 不依賴固定產品名稱。明確 exact-name 設定具有最高優先權；否則使用名稱、描述與 parameter schema 的網路語意進行保守分類，並排除 local filesystem、repository、database、shell 等能力。
+Tool classification does not depend on fixed product names. Explicit exact-name configuration has highest priority; otherwise the classifier uses network semantics in function names, descriptions, and parameter schemas while excluding local filesystem, repository, database, and shell capabilities.
 
-找不到可用工具時，Recovery 保留原始工具集合，不生成不存在的 function name。
+When no usable network tool is identified, Recovery preserves the original tool set and does not invent a function name. This Recovery logic applies only before an OpenAI Tool Call is committed.
 
 ## Claude Code file-tool recovery
 
-此政策只存在於 Anthropic service。`tools[]` 與 `input_schema` 是執行期權威。
+This policy exists only in the Anthropic service. `tools[]` and `input_schema` are runtime authority.
 
-第一輪與 Recovery 輸出在 raw replay 前都會檢查：
+The initial and Recovery outputs are checked before raw replay for:
 
-- `Edit` 是否為 `old_string === new_string`。
-- Mutation arguments 是否完整重送已由 `tool_result.is_error:true` 證明失敗的 canonical call。
-- `Read`、`Edit`、`Write`、`NotebookEdit` arguments 是否符合 required、primitive type、enum 與 const 約束。
-- Tool target 是否可精確辨識。
+- `Edit` with `old_string === new_string`.
+- Exact retries of canonical mutation arguments already proven failed by `tool_result.is_error:true`.
+- Required fields, primitive types, enums, and constants for `Read`, `Edit`, `Write`, and `NotebookEdit`.
+- Precisely identifiable Tool targets.
 
-Read freshness 依 accepted history 追蹤。任何 failed mutation 會使該 target 的先前 Read 失效；任何 Bash Tool Result 會依預設設定清除全部 Read freshness。
+Read freshness is derived from accepted history. A failed mutation invalidates prior Read evidence for the target; a Bash Tool Result clears Read freshness according to configuration.
 
-沒有新鮮 target evidence 時，Recovery 只允許精確 `Read`。已有新鮮 evidence 時，Recovery 只允許原 mutation tool，並鎖定 target、禁止 no-op、禁止 `replace_all` 擴張及原參數重送。
+Without fresh target evidence, Recovery permits only the exact `Read`. With fresh evidence, it permits only the original mutation tool, locks the target, and rejects no-op, `replace_all` expansion, and exact failed-argument replay.
 
 ## Deterministic Tool JSON failures
 
-The generic Recovery path does not retry deterministic Tool structure failures:
+Anthropic and any protected non-passthrough validation path do not generically retry deterministic Tool structure failures:
 
 ```text
 malformed_tool_arguments
@@ -48,4 +66,4 @@ tool_argument_limit
 too_many_tool_calls
 ```
 
-These failures return `retryable:false` with payload-safe diagnostics. They do not include Tool argument contents. Model-strategy recovery such as sequential chunked file output is handled separately rather than replaying the same generic generation.
+OpenAI Tool Calls are different: after the transparent commit boundary, these conditions are observe-only diagnostics and cannot trigger blocking or Recovery. The client receives the original upstream stream and owns Tool aggregation, validation, execution, and retry policy.

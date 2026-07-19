@@ -29,6 +29,7 @@ const required = [
   'packages/openai/recovery.js',
   'packages/openai/tool-classifier.js',
   'packages/server/create-proxy-server.js',
+  'test/tool-passthrough-v053.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -53,7 +54,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.5.2') errors.push('package.json version must be 0.5.2');
+if (packageJson.version !== '0.5.3') errors.push('package.json version must be 0.5.3');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -76,6 +77,7 @@ if (!compose.includes('TOOL_CORRELATION_TTL_MS')) errors.push('Compose must expo
 if (!compose.includes('TOOL_CORRELATION_MAX_ENTRIES')) errors.push('Compose must expose tool correlation capacity');
 if (!compose.includes('TOOL_ARGUMENT_WARNING_BYTES')) errors.push('Compose must expose Tool argument warning threshold');
 if (!compose.includes('TOOL_ARGUMENT_CRITICAL_BYTES')) errors.push('Compose must expose Tool argument critical threshold');
+if (!compose.includes('TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES')) errors.push('Compose must expose Tool passthrough observation bound');
 if (!compose.includes('CLIENT_RETRY_FINGERPRINT_TTL_MS')) errors.push('Compose must expose client retry fingerprint TTL');
 if (!compose.includes('CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES')) errors.push('Compose must expose client retry fingerprint capacity');
 
@@ -95,6 +97,9 @@ for (const route of ["path === '/v1/messages'", "path === '/v1/messages/count_to
 }
 if (!gateway.includes('createAnthropicProxyRuntime')) errors.push('Gateway must load the Anthropic runtime in-process');
 if (!gateway.includes('createOpenAiProxyRuntime')) errors.push('Gateway must load the OpenAI runtime in-process');
+
+const openAiRuntime = readFileSync(resolve(root, 'apps/vllm-openai-proxy/server.js'), 'utf8');
+if (!openAiRuntime.includes('transparentToolPassthrough: true')) errors.push('OpenAI guarded routes must enable transparent Tool passthrough');
 
 function collect(directory, output = []) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {

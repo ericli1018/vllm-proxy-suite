@@ -16,11 +16,12 @@ OpenAI SDK / OpenAI-compatible Client
 - 依原生 API path 精確分流，不增加 `/anthropic` 或 `/openai` 前綴。
 - Gateway 與協議模組位於同一個 Node.js process，路由不產生額外網路 hop。
 - Anthropic 與 OpenAI runtime 各自保有 API Key、Metrics、active-request 計數與 Buffer Budget。
-- 共用 Loop Detector、完整 Attempt 緩衝、Timeout、Cancellation 與 Recovery 控制。
-- 正常成功回應保留上游原始 response bytes。
-- Loop 或結構錯誤發生時，整份失敗 Attempt 丟棄；失敗 Thinking、Text 與 Tool Call 不會外洩或成為任務進度。
-- 最多執行一次 Recovery。
-- OpenAI Recovery 只使用當次 request 真正提供的網路查詢或下載工具，不預設固定工具名稱。
+- 共用 Loop Detector、Timeout、Cancellation 與最多一次 Recovery 控制。
+- Anthropic Messages 保持完整 Attempt 緩衝、驗證、Recovery 與原始 bytes 回放。
+- OpenAI Chat Completions／Responses 在第一個 Tool Call 前保持 Protected Streaming；第一個 Tool delta 出現後立即切換成透明直送。
+- OpenAI Tool commit 後不阻擋、不修補、不拆分、不重寫 Tool arguments，也不再執行 Recovery；Proxy 只保留有界觀測與計數。
+- OpenAI 沒有 Tool Call 的回應仍保留上游原始 response bytes，通過驗證後回放。
+- OpenAI Recovery 只在 Tool commit 前使用當次 request 真正提供的網路查詢或下載工具，不預設固定工具名稱。
 - Claude Code Tool Recovery 只載入 Anthropic runtime，不會影響 OpenAI API。
 
 ## 原生路徑路由
@@ -29,8 +30,8 @@ OpenAI SDK / OpenAI-compatible Client
 |---|---|---|
 | `POST /v1/messages` | Anthropic | Messages Guard、Loop Recovery、Claude Code Tool Recovery |
 | `/v1/messages/count_tokens` | Anthropic | 透明穿透 |
-| `POST /v1/chat/completions` | OpenAI | Chat Completions Guard |
-| `POST /v1/responses` | OpenAI | Responses Guard |
+| `POST /v1/chat/completions` | OpenAI | Pre-Tool Think Guard；Tool Call 透明直送 |
+| `POST /v1/responses` | OpenAI | Pre-Tool Think Guard；Function Call 透明直送 |
 | 其他 `/v1/*` | OpenAI | 透明穿透 |
 | 其他路徑 | Gateway | `404` |
 
@@ -188,9 +189,9 @@ curl http://127.0.0.1:3456/v1/models \
   -H "Authorization: Bearer $VLLM_OPENAI_PROXY_API_KEY"
 ```
 
-## Loop Guard
+## Loop Guard 與 OpenAI Tool Passthrough
 
-受保護端點採 Protected Streaming：
+### Anthropic／無 Tool 的 OpenAI 回應
 
 ```text
 Upstream Attempt
@@ -206,7 +207,28 @@ Attempt 完成前只可能送出標準 SSE comment：
 : keep-alive
 ```
 
-因此 Client 不會即時取得第一輪正式 token；這是確保錯誤輸出可完全撤銷的必要取捨。
+### OpenAI Tool Call
+
+```text
+Upstream Attempt
+→ Tool Call 前：完整緩衝、Thinking Loop Guard、Semantic Guard
+→ 第一個 Tool Call 被解析
+→ 不可逆 commit boundary
+→ 停止 heartbeat
+→ 立即 flush 已緩衝的原始 bytes
+→ 後續 upstream bytes 依 backpressure 直接送 Client
+→ Tool parser 只作有界 observe-only 計數
+```
+
+Commit 之後：
+
+- 不驗證後才決定是否交付。
+- 不因 malformed／truncated／oversized Tool JSON 阻擋 response。
+- 不修補、重組、分段或替換 Tool Call。
+- 不執行 Proxy Recovery。
+- 若 upstream 或 client 中斷，只能終止已 commit 的 stream，不能再附加第二份 protocol error。
+
+這個設計讓 Proxy 只處理 Tool Call 前的 Thinking Loop，Tool aggregation、JSON validity、execution 與 retry policy 回到 Hermes／OpenAI-compatible Client。
 
 ## OpenAI 網路工具 Recovery
 
@@ -227,6 +249,7 @@ RECOVERY_NETWORK_HYBRID_TOOL_NAMES='browser_agent'
 ```
 
 沒有可辨識網路工具時，Proxy 不會虛構工具名稱。
+此 Recovery 僅能發生在 OpenAI Tool commit 前；Recovery generation 一旦開始輸出 Tool Call，也立即切換為透明直送。
 
 ## Anthropic Request Policy
 
@@ -283,17 +306,18 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `TOTAL_GENERATION_TIMEOUT_MS` | `1800000` |
 | `RECOVERY_TIMEOUT_MS` | `900000` |
 | `MAX_ACTIVE_REQUESTS` | `256`，每個 protocol runtime 各自計算 |
-| `MAX_RESPONSE_BUFFER_BYTES` | `33554432` |
+| `MAX_RESPONSE_BUFFER_BYTES` | `33554432`，OpenAI Tool commit 前與受保護回應使用 |
 | `MAX_TOTAL_BUFFERED_BYTES` | `1073741824`，每個 protocol runtime 各自計算 |
-| `MAX_TOOL_ARGUMENT_BYTES` | `8388608`，單一 Tool Call 的硬上限 |
+| `MAX_TOOL_ARGUMENT_BYTES` | `8388608`，受保護 Tool 驗證路徑的硬上限；OpenAI commit 後不阻擋 |
 | `TOOL_ARGUMENT_WARNING_BYTES` | `8192`，設為 `0` 可停用 warning |
 | `TOOL_ARGUMENT_CRITICAL_BYTES` | `16384`，設為 `0` 可停用 critical warning |
+| `TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES` | `65536`，OpenAI Tool commit 後每個 arguments 最多保留的診斷前綴；`0` 表示只計數、不保留內容 |
 | `TOOL_CORRELATION_TTL_MS` | `900000` |
 | `TOOL_CORRELATION_MAX_ENTRIES` | `10000` |
 | `CLIENT_RETRY_FINGERPRINT_TTL_MS` | `900000` |
 | `CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES` | `10000` |
 
-`TOOL_ARGUMENT_WARNING_BYTES` 與 `TOOL_ARGUMENT_CRITICAL_BYTES` 只發出診斷事件，不會截斷或改寫 Tool arguments。真正的拒絕門檻仍由 `MAX_TOOL_ARGUMENT_BYTES` 控制。Client retry fingerprint 使用 path 與原始 request body 的精確 SHA-256；只辨識 byte-identical retry，不會對相似 prompt 做模糊比對。
+`TOOL_ARGUMENT_WARNING_BYTES` 與 `TOOL_ARGUMENT_CRITICAL_BYTES` 只發出診斷事件，不會截斷或改寫 Tool arguments。`MAX_TOOL_ARGUMENT_BYTES` 仍用於受保護的驗證路徑；OpenAI Tool Call 一旦 commit，任何大小或 JSON 狀態都只能 observe-only，不能撤銷已送出的 stream。`TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES` 只限制 Proxy 內部保留的 arguments 前綴，總 byte／fragment counters 仍精確。Client retry fingerprint 使用 path 與原始 request body 的精確 SHA-256；只辨識 byte-identical retry，不會對相似 prompt 做模糊比對。
 
 ### Claude Code Recovery
 
@@ -333,11 +357,14 @@ npm run check
 
 ## 已知限制
 
-- Protected Streaming 增加首個正式 token 的延遲。
+- OpenAI Tool passthrough 不會修復模型因 completion limit、parser 或格式錯誤產生的不完整 Tool arguments；Client 仍可能拒絕或重試。
+- `tool_passthrough_started` 之後 response 已不可撤銷；上游或 Client 中斷時不能再附加 Recovery 或第二份 protocol error。
+- Tool commit 前的 reasoning 仍採 Protected Streaming，因此第一個正式 token 會有延遲。
 - 兩個 protocol runtime 共用同一個 Node.js heap；任一模組造成 process-level OOM 都會影響整套服務。
-- 兩個 runtime 的 Buffer Budget 與 active-request counter 仍各自獨立，因此 `MAX_TOTAL_BUFFERED_BYTES` 是每個 runtime 的限制，不是整個 process 的合計限制。
+- 兩個 runtime 的 Buffer Budget 與 active-request counter 各自獨立，因此 `MAX_TOTAL_BUFFERED_BYTES` 是每個 runtime 的限制，不是 process 合計。
 - `/v1/responses` 未辨識的新事件會保留在原始 SSE bytes，但不一定計入語意進度。
-- 尚未在本環境完成真實 Claude Code → Gateway → vLLM 與 OpenAI SDK → Gateway → vLLM 整合。
+- 詳細限制見 `docs/known-limitations.md`。
+- 尚未在本環境完成真實 Claude Code／Hermes／OpenAI SDK → Gateway → vLLM 整合。
 
 ## 安全與部署
 
@@ -353,8 +380,8 @@ The suite uses structured log levels. Reasoning, response text, source code, Too
 | Level | Events |
 |---|---|
 | `error` | unrecoverable upstream, protocol, buffer, replay, and request failures |
-| `warn` | loop detection, cancellation, transport/semantic stalls, Tool argument growth thresholds, and failed-request client retries |
-| `info` | request lifecycle, recovery lifecycle, Tool calls ready/delivered, latest-turn Tool results, and replay lifecycle |
+| `warn` | loop detection, cancellation, transport/semantic stalls, Tool growth thresholds, observe-only Tool findings, and failed-request client retries |
+| `info` | request lifecycle, Recovery, protected replay, OpenAI Tool passthrough, Tool delivery, and latest-turn Tool Results |
 | `debug` | state transitions, exact-request fingerprints, Tool Result history context, and periodic request progress |
 | `trace` | upstream chunk metadata; optional redacted and truncated Tool payload previews when explicitly enabled |
 
@@ -368,6 +395,7 @@ PROGRESS_STALL_WARNING_MS: "30000"
 LOG_TOOL_PAYLOADS: "false"
 TOOL_ARGUMENT_WARNING_BYTES: "8192"
 TOOL_ARGUMENT_CRITICAL_BYTES: "16384"
+TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES: "65536"
 TOOL_CORRELATION_TTL_MS: "900000"
 TOOL_CORRELATION_MAX_ENTRIES: "10000"
 CLIENT_RETRY_FINGERPRINT_TTL_MS: "900000"
@@ -377,7 +405,7 @@ CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES: "10000"
 Example debug record:
 
 ```text
-2026-07-19T00:00:00.000Z [debug] event=request_progress service="vllm-openai-proxy" requestId="..." phase="initial" attempt=1 state="upstream_streaming" elapsedMs=40000 upstreamBytes=18240 streamAverageBytesPerSec=612 recentBytesPerSec=590 upstreamChunks=93 sseEvents=147 reasoningBytes=7412 contentBytes=0 toolNameBytes=4 toolArgumentBytes=128 semanticBytes=7544 toolCallCount=1 toolCallIndexes=[0] toolNames=["Read"] toolArgumentBytesByCall={"choice:0/tool:0":128} toolArgumentFragmentsByCall={"choice:0/tool:0":6} parallelToolCallsDetected=false finishReason=null doneReceived=false usagePromptTokens=null usageCompletionTokens=null rawBufferedBytes=18240 estimatedRequestMemoryBytes=25784 globalBufferedBytes=18240 globalBufferUtilizationRatio=0.000017 globalBufferUtilizationPercent=0.0017 lastUpstreamActivityMs=183 lastSemanticActivityMs=183 timeToHeadersMs=12 timeToFirstByteMs=845 timeToFirstSemanticMs=901
+2026-07-19T00:00:00.000Z [debug] event=request_progress service="vllm-openai-proxy" requestId="..." phase="initial" attempt=1 state="tool_passthrough_streaming" elapsedMs=40000 upstreamBytes=18240 streamAverageBytesPerSec=612 recentBytesPerSec=590 upstreamChunks=93 sseEvents=147 reasoningBytes=7412 contentBytes=0 toolNameBytes=4 toolArgumentBytes=128 semanticBytes=7544 toolCallCount=1 toolCallIndexes=[0] toolNames=["Read"] toolArgumentBytesByCall={"choice:0/tool:0":128} toolArgumentFragmentsByCall={"choice:0/tool:0":6} parallelToolCallsDetected=false toolPassthroughCommitted=true toolPassthroughBufferedBytes=4096 finishReason=null doneReceived=false usagePromptTokens=null usageCompletionTokens=null rawBufferedBytes=0 parsedSemanticRetainedBytes=7544 estimatedRequestMemoryBytes=15088 globalBufferedBytes=0 globalBufferUtilizationRatio=0 globalBufferUtilizationPercent=0 lastUpstreamActivityMs=183 lastSemanticActivityMs=183 timeToHeadersMs=12 timeToFirstByteMs=845 timeToFirstSemanticMs=901
 ```
 
 The counters have distinct meanings:
@@ -391,6 +419,10 @@ The counters have distinct meanings:
 - `lastUpstreamActivityMs`: time since any upstream bytes arrived.
 - `lastSemanticActivityMs`: time since actual semantic bytes increased.
 - `rawBufferedBytes`: raw upstream bytes retained for Protected Streaming.
+- `parsedSemanticRetainedBytes`: semantic bytes currently retained by protocol parsers; after Tool commit this can be lower than total `semanticBytes`.
+- `toolPassthroughCommitted`: `true` after OpenAI crosses the irreversible Tool boundary.
+- `toolPassthroughBufferedBytes`: raw bytes flushed when Tool passthrough began.
+- `toolPassthroughElapsedMs`: elapsed time since the Tool stream was committed.
 - `estimatedRequestMemoryBytes`: diagnostic estimate including raw and parsed data; it is not Node heap accounting.
 - `globalBufferUtilizationRatio` and `globalBufferUtilizationPercent`: unambiguous ratio and percentage views; the legacy `globalBufferUtilization` field remains for compatibility.
 
@@ -403,9 +435,26 @@ upstream_waiting_first_byte
 upstream_streaming
 attempt_validating
 response_replay_started / response_replay_completed
+tool_passthrough_committing
+tool_passthrough_streaming
+tool_passthrough_completed
 ```
 
-For Hermes Tool-loop diagnosis, use this event sequence:
+OpenAI Tool passthrough sequence:
+
+```text
+tool_passthrough_started
+# raw Tool SSE is already flowing to Client
+tool_passthrough_completed
+tool_calls_delivered
+request_completed mode=tool_passthrough
+
+# Next Hermes request
+tool_result_context historyCount=... latestTurnCount=...
+tool_results_received count=... parentRequestIds=[...]
+```
+
+Protected replay sequence, primarily for Anthropic and OpenAI responses without Tool Calls:
 
 ```text
 tool_calls_ready
@@ -413,21 +462,17 @@ response_replay_started
 response_replay_completed
 tool_calls_delivered
 request_completed
-
-# Next Hermes request
-tool_result_context historyCount=... latestTurnCount=...
-tool_results_received count=... parentRequestIds=[...]
 ```
 
 `tool_result_context` is a `debug` event: `historyCount` covers the full conversation history, while `latestTurnCount` covers only trailing Tool Result carrier messages in the new request. `tool_results_received` is emitted only when `latestTurnCount > 0`; it no longer republishes every historical Tool Result as a new receipt.
 
-`tool_calls_delivered` means Node emitted `finish` for protected response replay. It confirms response bytes were handed to the outgoing stream, but is not an application-level acknowledgement from Hermes. A correlated `tool_results_received` is stronger evidence that Hermes parsed the call, executed the tool, and submitted the next request.
+`tool_calls_delivered` means Node emitted `finish` for either protected replay or transparent Tool passthrough. It confirms response bytes were handed to the outgoing stream, but is not an application-level acknowledgement from Hermes. A correlated `tool_results_received` is stronger evidence that Hermes parsed the call, executed the tool, and submitted the next request.
 
 When Tool arguments cross configured thresholds, each attempt/Tool Call emits at most one `tool_argument_growth_warning` and one `tool_argument_growth_critical`. These are diagnostics only; the payload is not logged and the Tool Call is not modified.
 
-Malformed Tool JSON errors include payload-safe diagnostics and `retryable:false`, including Tool identity, per-call bytes/fragments, `parseErrorCategory`, and parse offsets. `parseErrorOffsetUnit="utf16_code_unit"` makes the JavaScript parser position explicit; UTF-8 byte length, UTF-16 length, Unicode code-point count, and `parseErrorAtEnd` are reported separately.
+Malformed Tool JSON diagnostics include Tool identity, per-call bytes/fragments, `parseErrorCategory`, and explicit parse-offset units without logging the payload. On Anthropic protected paths these remain `retryable:false` failures. On OpenAI transparent Tool paths they are emitted only as `tool_passthrough_validation_warning action=observe_only`; delivery is unchanged. If the retained diagnostic prefix was truncated, the Proxy does not claim the complete Tool JSON is valid or invalid.
 
-Exact byte-identical request retries within the configured TTL emit `client_retry_detected` and increment the protocol metric. The event includes the previous request ID and terminal outcome, but only a shortened hash is logged. Semantically similar requests whose bytes changed are intentionally not correlated.
+Exact byte-identical request retries within the configured TTL emit `client_retry_detected` and increment the protocol metric. `retryDelayAfterTerminalMs`, `previousRequestDurationMs`, and `requestStartIntervalMs` separate the timing semantics; `retryDelayMs` remains a compatibility alias. Only a shortened hash is logged. Semantically similar requests whose bytes changed are intentionally not correlated.
 
 New Prometheus counters include:
 
@@ -435,6 +480,10 @@ New Prometheus counters include:
 vllm_openai_proxy_client_retries_detected_total
 vllm_openai_proxy_tool_argument_warnings_total
 vllm_openai_proxy_tool_argument_critical_total
+vllm_openai_proxy_tool_passthrough_started_total
+vllm_openai_proxy_tool_passthrough_completed_total
+vllm_openai_proxy_tool_passthrough_interruptions_total
+vllm_openai_proxy_tool_passthrough_validation_warnings_total
 vllm_cc_proxy_client_retries_detected_total
 vllm_cc_proxy_tool_argument_warnings_total
 vllm_cc_proxy_tool_argument_critical_total

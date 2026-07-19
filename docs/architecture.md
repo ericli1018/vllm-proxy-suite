@@ -19,6 +19,41 @@ OpenAI runtime ────┘
 
 `apps/gateway/server.js` owns the only HTTP listener. It classifies the native path and calls the selected protocol runtime directly in memory. There is no Nginx layer, no internal HTTP forwarding, and no protocol service ports.
 
+## Runtime policy split
+
+The two protocol runtimes deliberately use different Tool policies.
+
+### Anthropic runtime
+
+```text
+Upstream Messages stream
+→ protected buffer
+→ Thinking/structure/Tool validation
+├── valid → replay original bytes
+└── invalid/loop → at most one Recovery → validate → replay or fail closed
+```
+
+Claude Code file-tool validation and Recovery remain Anthropic-only.
+
+### OpenAI runtime
+
+```text
+Before first Tool Call
+→ protected buffer
+→ Thinking Loop and semantic guards remain active
+
+First Tool Call observed
+→ irreversible commit boundary
+→ stop heartbeat
+→ flush all buffered upstream bytes
+→ release response buffer reservation
+→ stream later upstream bytes directly with backpressure
+→ Tool parsing continues for bounded observe-only metrics
+→ no Tool blocking, rewriting, repair, splitting, or Recovery
+```
+
+This policy applies to `/v1/chat/completions` and `/v1/responses`. Non-stream OpenAI responses containing Tool Calls are delivered unchanged after the complete upstream JSON body arrives. OpenAI responses without Tool Calls keep the protected buffered validation path.
+
 ## Components
 
 ```text
@@ -33,29 +68,40 @@ Anthropic runtime
 ├── Messages request policy
 ├── Anthropic SSE adapter
 ├── Claude Code file-tool semantic recovery
-└── protocol-specific auth, metrics and buffer budget
+└── fail-closed protocol auth, metrics and buffer budget
 
 OpenAI runtime
 ├── Chat Completions adapter
 ├── Responses adapter
-├── generic network tool classifier
+├── pre-Tool Thinking Loop guard
+├── irreversible transparent Tool stream commit
+├── bounded observe-only Tool diagnostics
 └── protocol-specific auth, metrics and buffer budget
 
 Shared core
 ├── loop detector
 ├── response/global buffer budget implementation
 ├── SSE frame decoder
-├── full-attempt runner
+├── protected attempt runner with optional Tool commit sink
 └── timeout/cancellation handling
 ```
 
+## Commit boundary invariant
+
+Before the OpenAI Tool boundary, no formal model bytes are committed except optional SSE heartbeat comments. A failed pre-Tool attempt can therefore be discarded and recovered.
+
+After `tool_passthrough_started`, model bytes have entered the client stream. The boundary is irreversible:
+
+- Recovery is disabled for that attempt.
+- Tool JSON validity cannot block delivery.
+- A later upstream, client, or response-sink failure terminates the committed stream; the Proxy does not append a second protocol error body.
+- Node response backpressure is honored.
+
+The observer retains at most `TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES` of each Tool argument while total bytes and fragment counts remain exact. The retained prefix can be disabled with `0`.
+
 ## Isolation boundary
 
-The two protocol runtimes share one Node.js process and one heap, but each owns separate configuration, API key, active-request counters, metrics and `BufferBudget`. Claude Code Tool Recovery is loaded only by the Anthropic runtime. Generic network-tool recovery is loaded only by the OpenAI runtime.
-
-## Guarded response invariant
-
-A guarded response cannot enter the formal transcript before validation. On success, the proxy replays the original upstream bytes. On failure, the entire attempt—including reasoning, text and tool calls—is discarded before the single Recovery attempt.
+The two protocol runtimes share one Node.js process and one heap, but each owns separate configuration, API key, active-request counters, metrics and `BufferBudget`. Claude Code Tool Recovery is loaded only by the Anthropic runtime. Generic OpenAI Recovery can operate only before a Tool stream is committed.
 
 ## Deployment boundary
 

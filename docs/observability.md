@@ -3,12 +3,12 @@
 ## Log level policy
 
 - `error`: terminal failures only.
-- `warn`: stalls, loops, cancellations, rejected requests, Tool argument growth thresholds, and retries of previously failed requests.
-- `info`: request lifecycle, recovery, Tool readiness/delivery, latest-turn Tool results, and replay events.
-- `debug`: state transitions, periodic progress, exact-request retry fingerprints, and full-history versus latest-turn Tool Result context.
+- `warn`: stalls, loops, cancellations, rejected requests, Tool argument growth thresholds, observe-only Tool validation findings, and retries of previously failed requests.
+- `info`: request lifecycle, Recovery, OpenAI Tool passthrough, protected replay, Tool delivery, and latest-turn Tool Results.
+- `debug`: state transitions, periodic progress, exact-request fingerprints, and full-history versus latest-turn Tool Result context.
 - `trace`: transport chunk metadata and optional redacted payload previews.
 
-Normal operation should use `info`. Use `debug` while diagnosing long reasoning or Tool-loop waits. Use `trace` only for short controlled reproductions.
+Use `info` normally, `debug` for long reasoning or Tool-loop diagnosis, and `trace` only for short controlled reproductions.
 
 ## Progress interpretation
 
@@ -42,10 +42,10 @@ semanticBytes unchanged
 
 ```text
 toolArgumentBytes increasing
-→ the model is still assembling Tool Call arguments; this is semantic activity
+→ the model is assembling Tool Call arguments
 ```
 
-Tool diagnostics in `debug` progress:
+Tool diagnostics:
 
 ```text
 toolCallCount
@@ -58,33 +58,114 @@ toolArgumentFragmentsByCall
 parallelToolCallsDetected
 ```
 
-For Chat Completions, a continuation fragment that omits `index` is attached to the active Tool Call. A fragment carrying a new Tool Call `id` still creates a new call. Per-call keys use `choice:<choice>/tool:<index>`. Responses use `output:<index>/call:<id>`, and Anthropic uses `block:<index>`.
+For Chat Completions, a continuation fragment without `index` remains attached to the active Tool Call. A fragment with a new Tool Call `id` creates a new call. Keys are:
+
+```text
+Chat Completions: choice:<choice>/tool:<index>
+Responses:        output:<index>/call:<id>
+Anthropic:        block:<index>
+```
+
+## OpenAI Tool passthrough lifecycle
+
+OpenAI Chat Completions and Responses use a pre-Tool protected phase and a post-Tool transparent phase.
+
+Expected sequence:
+
+```text
+upstream_connecting
+upstream_headers_received
+upstream_waiting_first_byte
+upstream_streaming
+
+# First Tool Call becomes observable
+tool_passthrough_committing
+tool_passthrough_started
+tool_passthrough_streaming
+
+# Upstream ends and Node response finishes
+tool_passthrough_completed
+tool_calls_delivered
+request_completed mode=tool_passthrough
+```
+
+Interpretation:
+
+- Before `tool_passthrough_started`, Thinking Loop detection, semantic-stall detection, buffer limits, and Recovery remain active.
+- `tool_passthrough_started` is the irreversible boundary. The Proxy stops heartbeat output, flushes all buffered upstream bytes, releases the raw response buffer reservation, and forwards later bytes with backpressure.
+- After commit, Tool JSON validation is observe-only. The Proxy does not block, rewrite, repair, split, or recover the Tool Call.
+- `tool_passthrough_validation_warning action=observe_only` means the retained observation was sufficient to identify a malformed Tool Call, but delivery was not changed.
+- If observation exceeded its retained-prefix limit, the Proxy does not claim the complete Tool JSON is valid or invalid.
+- `tool_passthrough_completed` means the upstream stream ended and Node finished writing the outgoing response. It is not a Hermes application-level acknowledgement.
+- A later correlated `tool_results_received` is stronger evidence that Hermes parsed and executed the Tool Call.
+
+Non-stream OpenAI Tool responses emit the same passthrough lifecycle after the complete upstream JSON body is available; they cannot stream earlier because the upstream response itself is non-streaming.
+
+## Protected replay lifecycle
+
+Anthropic Messages and OpenAI responses that never emit a Tool Call remain protected:
+
+```text
+attempt_validating
+tool_calls_ready                 # when a protected runtime has Tool Calls
+response_replay_started
+response_replay_completed
+tool_calls_delivered
+request_completed
+```
+
+`tool_calls_ready` without `response_replay_completed` indicates protected replay did not finish. This sequence remains especially relevant to Anthropic/Claude Code Tool Recovery.
 
 ## Completion and usage diagnostics
 
-Progress and terminal records normalize the upstream completion boundary:
+Progress and terminal records normalize protocol completion:
 
 - Chat Completions: `finishReason`, `finishReasonsByChoice`, `doneReceived`.
 - Responses: `responseCompleted`, `responseFailed`, `responseStatus`.
 - Anthropic Messages: `messageStopped`, `stopReason`.
-- All protocols expose normalized `usagePromptTokens`, `usageCompletionTokens`, and `usageTotalTokens` when the upstream provides them.
+- All protocols: `usagePromptTokens`, `usageCompletionTokens`, `usageTotalTokens` when supplied upstream.
 
-Use these fields to distinguish:
+Examples:
 
 ```text
 finishReason="length"
-→ likely token-limit truncation
+→ likely completion-limit truncation
 
 finishReason="tool_calls" + malformed Tool JSON
-→ model/parser declared a Tool boundary but produced invalid arguments
+→ Tool boundary declared, but arguments were invalid
 
-doneReceived=false or no protocol completion marker
+doneReceived=false
 → inspect stream termination and parser completion
 ```
 
-## Tool argument growth thresholds
+For OpenAI Tool passthrough these are diagnostics only; they do not revoke delivered bytes.
+
+## Bounded Tool observation
 
 Configuration:
+
+```text
+TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES=65536
+```
+
+After OpenAI Tool commit, the parser retains at most this many UTF-8 bytes per Tool argument for diagnostics. Total `argumentBytes` and fragment counts remain exact and incremental.
+
+```text
+65536 → retain up to 64 KiB per Tool argument
+0     → retain no Tool argument content; counters only
+```
+
+When the retained prefix is incomplete:
+
+```text
+argumentsObservationTruncated=true
+argumentRetainedBytes=<bounded prefix>
+argumentBytes=<exact total observed bytes>
+```
+
+The Proxy does not parse the prefix as if it were the complete JSON document.
+
+## Tool argument growth thresholds
 
 ```text
 TOOL_ARGUMENT_WARNING_BYTES=8192
@@ -92,28 +173,18 @@ TOOL_ARGUMENT_CRITICAL_BYTES=16384
 MAX_TOOL_ARGUMENT_BYTES=8388608
 ```
 
-Warning and critical thresholds are diagnostic only. Each attempt/Tool Call emits each event at most once:
+Warning and critical thresholds are diagnostic. Each Attempt/Tool Call emits each event at most once:
 
 ```text
 tool_argument_growth_warning
 tool_argument_growth_critical
 ```
 
-The hard rejection limit remains `MAX_TOOL_ARGUMENT_BYTES`. Threshold events include Tool identity, argument bytes, fragments, attempt, and phase; they never include the payload.
+For transparent OpenAI Tool Calls, even `MAX_TOOL_ARGUMENT_BYTES` cannot revoke the stream after commit. The hard limit remains enforceable on protected validation paths, including Anthropic.
 
-## Hermes Tool round-trip
+## Tool Result round-trip
 
-Expected successful sequence:
-
-```text
-tool_calls_ready
-response_replay_started
-response_replay_completed
-tool_calls_delivered
-request_completed
-```
-
-A later Hermes request is split into two views:
+A later request is divided into full history and newly trailing Tool Results:
 
 ```text
 tool_result_context
@@ -128,19 +199,13 @@ tool_results_received
   toolRoundTripMs=...
 ```
 
-Interpretation:
-
-- `tool_calls_ready` without `response_replay_completed`: protected replay did not finish.
-- `tool_calls_delivered` without a later correlated latest-turn result: Node finished writing, but Hermes did not submit the next Tool Result request before correlation expiry.
-- `historyCount > 0` and `latestTurnCount = 0`: old Tool Results are merely present in conversation history; no new Tool Result was submitted in this request.
-- Correlated latest-turn results followed by `upstream_waiting_first_byte`: Hermes completed the Tool round-trip and the Proxy is waiting on vLLM.
-- Correlated latest-turn results followed by semantic progress: the next generation is operating normally.
-
-`tool_calls_delivered` is based on Node's response `finish` event, not a Hermes acknowledgement. A correlated latest-turn Tool Result request is the strongest available acknowledgement.
+- `historyCount > 0`, `latestTurnCount = 0`: only old Tool Results are present.
+- `latestTurnCount > 0`: the request contains a newly trailing Tool Result round.
+- A correlated latest-turn result followed by `upstream_waiting_first_byte` means Hermes completed the Tool round-trip and the Proxy is waiting on vLLM.
 
 ## Client retry diagnosis
 
-The Proxy hashes the guarded API path plus exact raw request body. A byte-identical request repeated within `CLIENT_RETRY_FINGERPRINT_TTL_MS` emits:
+The Proxy hashes the guarded API path plus exact raw request body. A byte-identical request repeated within the TTL emits:
 
 ```text
 client_retry_detected
@@ -149,21 +214,29 @@ previousTerminalEvent=...
 previousFailureReason=...
 previousRetryable=...
 retryDelayMs=...
+retryDelayAfterTerminalMs=...
+previousRequestDurationMs=...
+requestStartIntervalMs=...
 retryOrdinal=...
 ```
 
-Only the first 16 hex characters of the SHA-256 fingerprint are logged. This mechanism intentionally does not correlate near-duplicate or semantically equivalent requests.
+Definitions:
 
-Registry controls:
+- `retryDelayAfterTerminalMs`: current request start minus previous terminal event.
+- `previousRequestDurationMs`: previous terminal event minus previous request start.
+- `requestStartIntervalMs`: current request start minus previous request start.
+- `retryDelayMs`: compatibility field; equals delay after terminal when available, otherwise start interval.
+
+Only the first 16 hex characters of SHA-256 are logged. Near-duplicate or semantically equivalent requests are intentionally not correlated.
 
 ```text
 CLIENT_RETRY_FINGERPRINT_TTL_MS=900000
 CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES=10000
 ```
 
-## Malformed Tool argument diagnostics
+## Malformed Tool diagnostics
 
-Deterministic Tool JSON failures are logged with `retryable:false` and payload-safe fields:
+Protected validation and complete observe-only samples can expose payload-safe fields:
 
 ```text
 toolCallCount
@@ -184,21 +257,23 @@ toolArgumentCodePoints
 parseErrorAtEnd
 ```
 
-`parseErrorOffset` comes from JavaScript's JSON parser and is not a UTF-8 byte offset. The separate length fields prevent incorrect direct comparison. Full Tool arguments are never included at normal levels.
-
-Malformed, invalid, oversized, and excessive Tool structures bypass generic Proxy Recovery. They require a changed generation strategy rather than blind regeneration.
+No complete Tool payload is logged at normal levels. On OpenAI transparent Tool paths, malformed diagnostics are warnings with `action=observe_only`; on Anthropic protected paths, deterministic Tool structure errors remain non-retryable validation failures.
 
 ## Metrics
 
-Each protocol exposes counters such as:
+Protocol metrics include:
 
 ```text
 <protocol>_client_retries_detected_total
 <protocol>_tool_argument_warnings_total
 <protocol>_tool_argument_critical_total
+<protocol>_tool_passthrough_started_total
+<protocol>_tool_passthrough_completed_total
+<protocol>_tool_passthrough_interruptions_total
+<protocol>_tool_passthrough_validation_warnings_total
 ```
 
-For the current metric prefixes:
+The passthrough counters normally increase only for the OpenAI runtime. Metric prefixes are:
 
 ```text
 vllm_openai_proxy_...
@@ -209,18 +284,24 @@ Use `/metrics`, `/metrics/openai`, or `/metrics/cc`.
 
 ## Buffer fields
 
-- `globalBufferUtilizationRatio`: value from `0` to `1`.
-- `globalBufferUtilizationPercent`: percentage from `0` to `100`.
-- `globalBufferUtilization`: legacy ratio retained for compatibility.
+- `rawBufferedBytes`: pre-commit raw bytes retained by Protected Streaming; it drops to zero after OpenAI Tool commit.
+- `parsedSemanticBytes`: exact semantic bytes observed from the model.
+- `parsedSemanticRetainedBytes`: bytes actually retained by the parser for diagnostics; bounded Tool prefixes make this lower after large Tool streams.
+- `toolPassthroughCommitted`: whether the irreversible boundary has been crossed.
+- `toolPassthroughBufferedBytes`: raw bytes flushed at commit.
+- `toolPassthroughElapsedMs`: time since Tool passthrough started.
+- `globalBufferUtilizationRatio`: `0` to `1`.
+- `globalBufferUtilizationPercent`: `0` to `100`.
+- `globalBufferUtilization`: legacy ratio.
 - `estimatedRequestMemoryBytes`: diagnostic estimate, not exact V8 heap accounting.
 
 ## Data safety
 
-Tool arguments and results are excluded by default. Only when both are enabled:
+Tool arguments and results are excluded from normal logs. Only with both:
 
 ```text
 LOG_LEVEL=trace
 LOG_TOOL_PAYLOADS=true
 ```
 
-the Proxy emits a truncated preview with common credential fields redacted. This can still expose project data and should only be used for controlled debugging.
+the Proxy emits a truncated preview with common credential fields redacted. This may still expose project data and should only be enabled for controlled debugging. Set `TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES=0` when no in-memory Tool argument prefix should be retained after commit.

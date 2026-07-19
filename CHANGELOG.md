@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.3 - 2026-07-19
+
+- Changed OpenAI Chat Completions and Responses to Reasoning-Guarded Transparent Tool Passthrough.
+- Added an irreversible commit boundary at the first observed OpenAI Tool Call: buffered pre-Tool bytes are flushed immediately and later upstream bytes stream directly to the client with backpressure.
+- Disabled Tool JSON blocking, rewriting, repair, splitting, and Recovery after the OpenAI Tool commit boundary; final Tool validation is observe-only.
+- Kept Thinking Loop detection, semantic validation, and one Recovery attempt active before the Tool commit boundary.
+- Preserved Anthropic Messages and Claude Code Tool validation/recovery as fail-closed buffered behavior.
+- Added bounded Tool argument observation with exact total byte/fragment counters and configurable retained prefix size; `0` retains no argument content.
+- Added Tool passthrough lifecycle metrics and logs, stopped SSE heartbeat before raw Tool stream commit, and made delivery-start failures irreversible to prevent replay after partial output.
+- Fixed client retry delay diagnostics to separate delay-after-terminal, previous request duration, and request-start interval.
+- Fixed per-call retained-byte accounting to remain incremental instead of reintroducing near O(n²) work on long Tool streams.
+
 ## 0.5.2 - 2026-07-19
 
 - Added normalized completion-boundary diagnostics for Chat Completions, Responses, and Anthropic Messages, including finish/stop status, protocol completion markers, and usage tokens.

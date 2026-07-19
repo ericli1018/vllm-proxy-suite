@@ -73,6 +73,7 @@ export function loadCommonConfig(env = process.env, defaults = {}) {
     logToolPayloadMaxBytes: parseInteger(env.LOG_TOOL_PAYLOAD_MAX_BYTES, 1024, { min: 0 }),
     toolArgumentWarningBytes,
     toolArgumentCriticalBytes,
+    toolPassthroughObservationMaxBytes: parseInteger(env.TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES, 64 * 1024, { min: 0 }),
     toolCorrelationTtlMs: parseInteger(env.TOOL_CORRELATION_TTL_MS, 15 * 60 * 1000, { min: 1000 }),
     toolCorrelationMaxEntries: parseInteger(env.TOOL_CORRELATION_MAX_ENTRIES, 10000, { min: 1 }),
     clientRetryFingerprintTtlMs: parseInteger(env.CLIENT_RETRY_FINGERPRINT_TTL_MS, 15 * 60 * 1000, { min: 1000 }),

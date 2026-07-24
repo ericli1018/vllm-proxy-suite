@@ -3,7 +3,12 @@
 import { loadCommonConfig, parseCsv } from '../../packages/core/config.js';
 import { chatCompletionsAdapter } from '../../packages/openai/chat-completions.js';
 import { responsesAdapter } from '../../packages/openai/responses.js';
-import { buildOpenAiRecoveryRequest, validateForcedToolRecovery } from '../../packages/openai/recovery.js';
+import {
+  assertChatMessageOrdering,
+  buildOpenAiRecoveryRequest,
+  inspectChatSystemMessages,
+  validateForcedToolRecovery,
+} from '../../packages/openai/recovery.js';
 import { planNetworkRecovery } from '../../packages/openai/tool-classifier.js';
 import { createProtocolProxyRuntime } from '../../packages/server/create-proxy-server.js';
 
@@ -33,6 +38,7 @@ function createRoute(adapter, api, config) {
     adapter,
     transparentToolPassthrough: true,
     prepareRequest(body) {
+      if (api === 'chat') assertChatMessageOrdering(body?.messages);
       return structuredClone(body);
     },
     buildRecovery({ originalBody, reason }) {
@@ -42,14 +48,26 @@ function createRoute(adapter, api, config) {
       const plan = reason.kind === 'loop'
         ? planNetworkRecovery({ tools: originalBody.tools || [], context, options: config.recoveryToolOptions })
         : { mode: 'none', candidateNames: [] };
-      return {
-        body: buildOpenAiRecoveryRequest(originalBody, {
+      const body = buildOpenAiRecoveryRequest(originalBody, {
           api,
           reason: reason.reason,
           plan,
           config,
-        }),
+        });
+      const systemMessages = api === 'chat' ? inspectChatSystemMessages(body.messages) : null;
+      return {
+        body,
         plan,
+        diagnostics: api === 'chat'
+          ? {
+            recoveryInstructionPlacement: originalBody.messages?.[0]?.role === 'system'
+              ? 'merged_leading_system'
+              : 'inserted_leading_system',
+            messageCount: body.messages.length,
+            systemMessageCount: systemMessages.count,
+            systemMessageIndexes: systemMessages.indexes,
+          }
+          : { recoveryInstructionPlacement: 'instructions' },
       };
     },
     validateRecovery(attempt, recovery) {

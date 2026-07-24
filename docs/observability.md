@@ -10,6 +10,31 @@
 
 Use `info` normally, `debug` for long reasoning or Tool-loop diagnosis, and `trace` only for short controlled reproductions.
 
+## Recovery request construction
+
+OpenAI Chat Recovery emits a debug record before the second upstream attempt:
+
+```text
+recovery_request_built
+recoveryInstructionPlacement="merged_leading_system" | "inserted_leading_system"
+messageCount=...
+systemMessageCount=1
+systemMessageIndexes=[0]
+```
+
+Responses Recovery reports `recoveryInstructionPlacement="instructions"`.
+
+If Recovery construction violates the request contract, the Proxy emits:
+
+```text
+recovery_request_rejected
+reason="system_message_not_first"
+message_index=...
+system_message_indexes=[...]
+```
+
+A Client request already containing a System Message outside `messages[0]` is rejected before upstream access with `request_rejected status=400 reason="system_message_not_first"`.
+
 ## Progress interpretation
 
 Transport and semantic progress are independent:

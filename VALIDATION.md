@@ -1,15 +1,20 @@
-# VLLM-PROXY-SUITE v0.5.3 Validation
+# VLLM-PROXY-SUITE v0.5.4 Validation
 
 Validated in the artifact environment:
 
-- `npm test`: 116 tests passed, 0 failed.
+- `npm test`: 122 tests passed, 0 failed.
 - `npm run check`: passed.
 - Source and clean ZIP extraction both passed the full test suite and package validator.
 - All 41 JavaScript files passed `node --check`.
-- Package validator reports version `0.5.3`, 53 files, 26 required files, and `valid:true`.
+- Package validator reports version `0.5.4`, 53 files, 26 required files, and `valid:true`.
 - Compose YAML parses successfully and defines exactly one `vllm-proxy-suite` service on `3456:3456`.
 - Compose startup shell passed `sh -n`.
 - Single Gateway smoke passed `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`, combined `/metrics`, and graceful SIGTERM drain.
+- OpenAI Chat Recovery merges its instruction into the single leading System Message or inserts it at `messages[0]` when absent.
+- OpenAI Chat Recovery preserves user, assistant, Tool Call, and Tool Result history order.
+- Client-supplied System Messages outside `messages[0]` are rejected with HTTP 400 before vLLM is contacted.
+- Leading System Message content arrays retain their existing blocks and receive a new Recovery text block.
+- OpenAI Responses Recovery remains based on `instructions` and is unaffected by Chat message ordering.
 - OpenAI Chat Completions and Responses commit buffered bytes at the first Tool Call and stream later upstream bytes before upstream completion.
 - OpenAI malformed Tool arguments remain in the original status-200 stream and produce observe-only diagnostics rather than Proxy failure or Recovery.
 - Non-stream OpenAI Tool responses bypass Tool argument validity gates unchanged after the complete JSON body is received.

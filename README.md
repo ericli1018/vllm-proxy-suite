@@ -22,6 +22,7 @@ OpenAI SDK / OpenAI-compatible Client
 - OpenAI Tool commit 後不阻擋、不修補、不拆分、不重寫 Tool arguments，也不再執行 Recovery；Proxy 只保留有界觀測與計數。
 - OpenAI 沒有 Tool Call 的回應仍保留上游原始 response bytes，通過驗證後回放。
 - OpenAI Recovery 只在 Tool commit 前使用當次 request 真正提供的網路查詢或下載工具，不預設固定工具名稱。
+- OpenAI Chat 的 System Message 契約固定為最多一個且只能位於 `messages[0]`；Proxy 產生 Recovery 時會合併至該開頭訊息，Client 提供中途 System Message 則在進入 vLLM 前回傳明確 `400`。
 - Claude Code Tool Recovery 只載入 Anthropic runtime，不會影響 OpenAI API。
 
 ## 原生路徑路由

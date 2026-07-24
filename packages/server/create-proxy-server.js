@@ -409,7 +409,14 @@ export function createProtocolProxyRuntime({
       try {
         firstBody = route.prepareRequest(originalBody, { recovery: false, config });
       } catch (error) {
-        return rejectRequest(400, 'invalid_request', error instanceof Error ? error.message : String(error));
+        const type = error?.code || 'invalid_request';
+        terminal('request_rejected', { status: 400, reason: type, ...(error?.details || {}) }, 'warn');
+        return jsonResponse(response, 400, formatJsonError(
+          type,
+          error instanceof Error ? error.message : String(error),
+          requestId,
+          error?.details || {},
+        ));
       }
       const streaming = Boolean(firstBody.stream);
       const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
@@ -571,8 +578,13 @@ export function createProtocolProxyRuntime({
         let recovery;
         try {
           recovery = route.buildRecovery({ originalBody, firstBody, reason, config });
+          requestLogger.debug('recovery_request_built', recovery.diagnostics || {});
         } catch (error) {
           heartbeat?.stop();
+          requestLogger.warn('recovery_request_rejected', {
+            reason: error?.code || 'recovery_build_failed',
+            ...(error?.details || {}),
+          });
           terminal('request_failed', { kind: 'recovery_build_failed', reason: error instanceof Error ? error.message : String(error) }, 'error');
           return sendGuardedFailure({ response, route, streaming, status: 502, type: 'recovery_build_failed', message: error instanceof Error ? error.message : String(error), requestId, formatJsonError });
         }

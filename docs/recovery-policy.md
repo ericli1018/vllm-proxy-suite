@@ -32,6 +32,27 @@ ORIGINAL_ATTEMPT
 
 If an OpenAI Recovery generation emits a Tool Call, that Recovery response crosses the same transparent commit boundary. Post-generation forced-Tool validation cannot revoke bytes already delivered.
 
+## OpenAI Chat System Message contract
+
+For `/v1/chat/completions`, a System Message is optional, but when present it must be the only System Message and must occupy `messages[0]`.
+
+Proxy-generated Recovery instructions preserve that contract:
+
+```text
+leading System Message exists
+→ append Recovery text to its content
+
+no System Message exists
+→ insert Recovery System Message at messages[0]
+
+System Message exists at any later index
+→ reject before vLLM with HTTP 400 system_message_not_first
+```
+
+The Proxy never moves a Client-supplied late System Message because doing so could change conversation authority or chronology. Recovery construction preserves the relative order and content of all user, assistant, and Tool messages.
+
+For System Message content arrays, Recovery appends a `{type:"text", text:"..."}` block. `/v1/responses` remains unchanged and appends Recovery text through `instructions` rather than `messages[]`.
+
 ## OpenAI network capability
 
 Tool classification does not depend on fixed product names. Explicit exact-name configuration has highest priority; otherwise the classifier uses network semantics in function names, descriptions, and parameter schemas while excluding local filesystem, repository, database, and shell capabilities.

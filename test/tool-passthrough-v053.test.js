@@ -510,3 +510,78 @@ test('Tool passthrough progress distinguishes exact semantic bytes from retained
   assert.ok(final.parsedSemanticRetainedBytes <= 64, `retained bytes were ${final.parsedSemanticRetainedBytes}`);
   assert.ok(final.estimatedRequestMemoryBytes < final.parsedSemanticBytes);
 });
+
+test('OpenAI runtime rejects a late Chat system message before contacting vLLM', async (t) => {
+  let upstreamRequests = 0;
+  const upstream = http.createServer((_req, res) => {
+    upstreamRequests += 1;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  const upstreamUrl = await listen(upstream);
+  const runtime = createOpenAiProxyRuntime({ config: config({ vllmBaseUrl: upstreamUrl, port: 0 }), exposeControlRoutes: false });
+  const proxy = http.createServer(runtime.handle);
+  const proxyUrl = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'm',
+      messages: [
+        { role: 'user', content: 'hello' },
+        { role: 'system', content: 'late policy' },
+      ],
+    }),
+  });
+
+  const payload = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(upstreamRequests, 0);
+  assert.equal(payload.error.code, 'system_message_not_first');
+  assert.equal(payload.error.message_index, 1);
+  assert.deepEqual(payload.error.system_message_indexes, [1]);
+});
+
+test('OpenAI runtime loop recovery keeps exactly one leading Chat system message', async (t) => {
+  const received = [];
+  const upstream = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    received.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (received.length === 1) {
+      res.end('data: {"choices":[{"index":0,"delta":{"reasoning":"Need evidence then act. Need evidence then act."}}]}\n\ndata: [DONE]\n\n');
+    } else {
+      res.end('data: {"choices":[{"index":0,"delta":{"content":"RECOVERED"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    }
+  });
+  const upstreamUrl = await listen(upstream);
+  const runtime = createOpenAiProxyRuntime({ config: config({ vllmBaseUrl: upstreamUrl, port: 0 }), exposeControlRoutes: false });
+  const proxy = http.createServer(runtime.handle);
+  const proxyUrl = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'm',
+      stream: true,
+      messages: [
+        { role: 'system', content: 'Original policy' },
+        { role: 'user', content: 'answer' },
+      ],
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /RECOVERED/);
+  assert.equal(received.length, 2);
+  assert.equal(received[1].messages[0].role, 'system');
+  assert.match(received[1].messages[0].content, /^Original policy\n\n/);
+  assert.match(received[1].messages[0].content, /failed attempt is not task progress/i);
+  assert.deepEqual(received[1].messages.slice(1), [{ role: 'user', content: 'answer' }]);
+  assert.equal(received[1].messages.filter((message) => message.role === 'system').length, 1);
+});

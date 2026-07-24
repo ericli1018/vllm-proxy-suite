@@ -1,12 +1,65 @@
 import { toolName } from './tool-classifier.js';
 
+export function inspectChatSystemMessages(messages) {
+  const indexes = [];
+  for (const [index, message] of (Array.isArray(messages) ? messages : []).entries()) {
+    if (message?.role === 'system') indexes.push(index);
+  }
+  return {
+    count: indexes.length,
+    indexes,
+    valid: indexes.length === 0 || (indexes.length === 1 && indexes[0] === 0),
+  };
+}
+
+export function validateChatMessageOrdering(messages) {
+  const inspection = inspectChatSystemMessages(messages);
+  if (inspection.valid) return { ok: true };
+  const messageIndex = inspection.indexes.find((index) => index !== 0) ?? inspection.indexes[1] ?? inspection.indexes[0];
+  return {
+    ok: false,
+    code: 'system_message_not_first',
+    message: 'System messages are only permitted at messages[0].',
+    messageIndex,
+    systemMessageIndexes: inspection.indexes,
+  };
+}
+
+export function assertChatMessageOrdering(messages) {
+  const validation = validateChatMessageOrdering(messages);
+  if (validation.ok) return;
+  const error = new Error(validation.message);
+  error.code = validation.code;
+  error.details = {
+    message_index: validation.messageIndex,
+    system_message_indexes: validation.systemMessageIndexes,
+  };
+  throw error;
+}
+
+function appendTextContent(content, text) {
+  if (typeof content === 'string') return content ? `${content}\n\n${text}` : text;
+  if (Array.isArray(content)) return [...content, { type: 'text', text }];
+  return text;
+}
+
 function appendInstruction(body, api, text) {
   if (api === 'responses') {
     body.instructions = body.instructions ? `${body.instructions}\n\n${text}` : text;
-    return;
+    return 'instructions';
   }
+
   if (!Array.isArray(body.messages)) body.messages = [];
-  body.messages.push({ role: 'system', content: text });
+  assertChatMessageOrdering(body.messages);
+  if (body.messages[0]?.role === 'system') {
+    body.messages[0].content = appendTextContent(body.messages[0].content, text);
+    assertChatMessageOrdering(body.messages);
+    return 'merged_leading_system';
+  }
+
+  body.messages.unshift({ role: 'system', content: text });
+  assertChatMessageOrdering(body.messages);
+  return 'inserted_leading_system';
 }
 
 function recoveryInstruction(reason, plan) {

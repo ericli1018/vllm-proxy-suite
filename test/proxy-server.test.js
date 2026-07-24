@@ -5,7 +5,7 @@ import { once } from 'node:events';
 
 import { createProtocolProxyServer } from '../packages/server/create-proxy-server.js';
 import { chatCompletionsAdapter } from '../packages/openai/chat-completions.js';
-import { buildOpenAiRecoveryRequest, validateForcedToolRecovery } from '../packages/openai/recovery.js';
+import { assertChatMessageOrdering, buildOpenAiRecoveryRequest, validateForcedToolRecovery } from '../packages/openai/recovery.js';
 import { planNetworkRecovery } from '../packages/openai/tool-classifier.js';
 import { loadCommonConfig } from '../packages/core/config.js';
 
@@ -38,7 +38,10 @@ function baseConfig(upstream) {
 function openAiGuardedRoute() {
   return {
     adapter: chatCompletionsAdapter,
-    prepareRequest: (body) => structuredClone(body),
+    prepareRequest(body) {
+      assertChatMessageOrdering(body?.messages);
+      return structuredClone(body);
+    },
     buildRecovery({ originalBody, reason, config }) {
       const plan = reason.kind === 'loop'
         ? planNetworkRecovery({ tools: originalBody.tools || [], context: originalBody.messages || [] })
@@ -61,7 +64,9 @@ function createSuite(upstream) {
     config: baseConfig(upstream),
     guardedRoutes: new Map([['/v1/chat/completions', openAiGuardedRoute()]]),
     allowPassthrough: (path) => path.startsWith('/v1/'),
-    formatJsonError: (type, message, requestId) => ({ error: { type, message, code: type, request_id: requestId } }),
+    formatJsonError: (type, message, requestId, extra = {}) => ({
+      error: { message, type, param: null, code: type, request_id: requestId, ...extra },
+    }),
   });
 }
 
@@ -122,7 +127,51 @@ test('guarded request discards looping first attempt and returns only recovery b
   assert.equal(attempts, 2);
   assert.match(text, /RECOVERED/);
   assert.doesNotMatch(text, /Need evidence then act/);
-  assert.match(received[1].messages.at(-1).content, /failed attempt is not task progress/i);
+  assert.equal(received[1].messages[0].role, 'system');
+  assert.match(received[1].messages[0].content, /failed attempt is not task progress/i);
+  assert.deepEqual(received[1].messages.slice(1), [{ role: 'user', content: 'answer' }]);
+  assert.equal(received[1].messages.filter((message) => message.role === 'system').length, 1);
+});
+
+test('guarded Chat request rejects a system message outside index zero before upstream', async (t) => {
+  let upstreamRequests = 0;
+  const upstream = http.createServer((_req, res) => {
+    upstreamRequests += 1;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  });
+  const upstreamUrl = await listen(upstream);
+  const suite = createSuite(upstreamUrl);
+  const proxyUrl = await suite.start();
+  t.after(async () => { await suite.stop(); upstream.close(); });
+
+  const response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'm',
+      messages: [
+        { role: 'user', content: 'hello' },
+        { role: 'system', content: 'late policy' },
+      ],
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(upstreamRequests, 0);
+  const payload = await response.json();
+  assert.equal(typeof payload.error.request_id, 'string');
+  assert.deepEqual({ ...payload, error: { ...payload.error, request_id: '<request-id>' } }, {
+    error: {
+      message: 'System messages are only permitted at messages[0].',
+      type: 'system_message_not_first',
+      param: null,
+      code: 'system_message_not_first',
+      request_id: '<request-id>',
+      message_index: 1,
+      system_message_indexes: [1],
+    },
+  });
 });
 
 test('loop recovery forces only a currently available generic network tool', async (t) => {

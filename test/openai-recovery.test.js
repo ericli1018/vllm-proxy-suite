@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { classifyTools, planNetworkRecovery } from '../packages/openai/tool-classifier.js';
-import { buildOpenAiRecoveryRequest, validateForcedToolRecovery } from '../packages/openai/recovery.js';
+import {
+  buildOpenAiRecoveryRequest,
+  inspectChatSystemMessages,
+  validateChatMessageOrdering,
+  validateForcedToolRecovery,
+} from '../packages/openai/recovery.js';
 import { loadCommonConfig } from '../packages/core/config.js';
 
 const chatTools = [
@@ -49,7 +54,79 @@ test('buildOpenAiRecoveryRequest filters tools and forces one available Chat too
   assert.deepEqual(recovery.tools.map((tool) => tool.function.name), ['knowledge_probe']);
   assert.deepEqual(recovery.tool_choice, { type: 'function', function: { name: 'knowledge_probe' } });
   assert.equal(recovery.parallel_tool_calls, false);
-  assert.match(recovery.messages.at(-1).content, /failed attempt is not task progress/i);
+  assert.equal(recovery.messages[0].role, 'system');
+  assert.match(recovery.messages[0].content, /failed attempt is not task progress/i);
+  assert.equal(recovery.messages.at(-1).role, 'user');
+});
+
+test('Chat recovery merges instruction into the single leading system message', () => {
+  const original = {
+    model: 'm',
+    messages: [
+      { role: 'system', content: 'Original policy' },
+      { role: 'user', content: 'Do the task' },
+      { role: 'assistant', content: 'Working' },
+      { role: 'tool', tool_call_id: 'call-1', content: 'result' },
+    ],
+  };
+  const recovery = buildOpenAiRecoveryRequest(original, {
+    api: 'chat',
+    reason: 'repeated_reasoning_segment',
+    plan: { mode: 'none', candidateNames: [] },
+    config: loadCommonConfig({}),
+  });
+
+  assert.equal(recovery.messages.length, original.messages.length);
+  assert.equal(recovery.messages[0].role, 'system');
+  assert.match(recovery.messages[0].content, /^Original policy\n\n/);
+  assert.match(recovery.messages[0].content, /failed attempt is not task progress/i);
+  assert.deepEqual(recovery.messages.slice(1), original.messages.slice(1));
+  assert.deepEqual(inspectChatSystemMessages(recovery.messages), {
+    count: 1,
+    indexes: [0],
+    valid: true,
+  });
+  assert.equal(original.messages[0].content, 'Original policy');
+});
+
+test('Chat recovery appends a text block when the leading system content is an array', () => {
+  const recovery = buildOpenAiRecoveryRequest({
+    model: 'm',
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 'Original policy' }] },
+      { role: 'user', content: 'Do the task' },
+    ],
+  }, {
+    api: 'chat',
+    reason: 'loop',
+    plan: { mode: 'none', candidateNames: [] },
+    config: loadCommonConfig({}),
+  });
+
+  assert.equal(recovery.messages[0].content.length, 2);
+  assert.deepEqual(recovery.messages[0].content[0], { type: 'text', text: 'Original policy' });
+  assert.equal(recovery.messages[0].content[1].type, 'text');
+  assert.match(recovery.messages[0].content[1].text, /failed attempt is not task progress/i);
+});
+
+test('Chat recovery rejects an original system message outside index zero', () => {
+  const messages = [
+    { role: 'user', content: 'Do the task' },
+    { role: 'system', content: 'Late policy' },
+  ];
+  assert.deepEqual(validateChatMessageOrdering(messages), {
+    ok: false,
+    code: 'system_message_not_first',
+    message: 'System messages are only permitted at messages[0].',
+    messageIndex: 1,
+    systemMessageIndexes: [1],
+  });
+  assert.throws(() => buildOpenAiRecoveryRequest({ model: 'm', messages }, {
+    api: 'chat',
+    reason: 'loop',
+    plan: { mode: 'none', candidateNames: [] },
+    config: loadCommonConfig({}),
+  }), (error) => error?.code === 'system_message_not_first' && error?.details?.message_index === 1);
 });
 
 test('buildOpenAiRecoveryRequest uses Responses tool_choice shape', () => {

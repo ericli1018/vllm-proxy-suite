@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.4 - 2026-07-24
+
+- Fixed OpenAI Chat Recovery placing a new `role:"system"` message at the end of `messages[]`, which violated Ornith/vLLM chat-template ordering and caused `System message must be at the beginning` HTTP 400 failures.
+- Recovery now merges its instruction into the existing leading System Message, or inserts one at `messages[0]` when none exists, without reordering user/assistant/tool history.
+- Added support for leading System Message content arrays by appending a text content block instead of stringifying the array.
+- Added request-contract validation that rejects Client-supplied System Messages outside `messages[0]` before contacting vLLM, returning `system_message_not_first` with message indexes.
+- Added `recovery_request_built` and `recovery_request_rejected` diagnostics with instruction placement and System Message counts/indexes.
+- Added unit and end-to-end OpenAI runtime coverage for leading-System merge, System-free insertion, late-System rejection, history preservation, and unaffected Responses Recovery.
+
 ## 0.5.3 - 2026-07-19
 
 - Changed OpenAI Chat Completions and Responses to Reasoning-Guarded Transparent Tool Passthrough.

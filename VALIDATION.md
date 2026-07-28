@@ -1,28 +1,30 @@
-# VLLM-PROXY-SUITE v0.5.6 Validation
+# VLLM-PROXY-SUITE v0.5.8 Validation
 
 Validated in the artifact environment:
 
-- `npm test`: 138 tests passed, 0 failed.
-- `npm run check`: passed.
-- Source and clean ZIP extraction both passed the full test suite and package validator.
-- All 43 JavaScript files passed `node --check`.
-- Package validator reports version `0.5.6`, 55 files, 28 required files, and `valid:true`.
-- Compose YAML parses successfully and defines exactly one `vllm-proxy-suite` service on `3456:3456`.
-- Compose startup shell passed `sh -n`.
-- Single Gateway smoke passed `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`, combined `/metrics`, and graceful SIGTERM drain.
-- A Responses stream containing repeated reasoning, visible output, and `response.completed` replays byte-for-byte with HTTP 200 and no Recovery.
-- Visible Responses output closes the Think Loop Guard for later chunks in the same Attempt.
-- A true three-repeat reasoning loop before output, Function Call, or terminal state is still detected.
-- Exact suffix, normalized suffix, and ABAB cycle detection honor `LOOP_MIN_COUNT`.
-- Production Compose defaults `LOOP_MIN_COUNT` to `3`; tests that intentionally exercise two-repeat recovery opt into `2`.
-- Existing Responses incomplete/cancelled terminal handling, transparent Tool passthrough, OpenAI Chat Recovery, and Anthropic Claude Code Recovery remain covered.
-- Source and clean ZIP manifests are identical.
+- `npm test`: 174 tests passed, 0 failed in both the source tree and a clean ZIP extraction.
+- `npm run check`: passed in both the source tree and a clean ZIP extraction.
+- All 47 JavaScript files passed `node --check`.
+- Package validator reports version `0.5.8`, 59 files, 32 required files, and `valid:true`.
+- Compose YAML parses successfully, defines one `vllm-proxy-suite` service, and defaults `RESPONSES_UPSTREAM_MODE` to `chat_adapter` through `VLLM_PROXY_RESPONSES_UPSTREAM_MODE`.
+- The Compose startup command passed `sh -n` after YAML parsing.
+- Single Gateway smoke passed `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`, combined `/metrics`, and graceful SIGTERM drain with exit code `0` in both source and clean ZIP trees.
+- Source and clean ZIP manifests are identical at 59 files.
+- `/v1/responses` supports selectable `chat_adapter` and `native` upstream modes; `chat_adapter` is the default.
+- Adapter mode sends converted requests to vLLM `/v1/chat/completions` while preserving the external Codex `/v1/responses` contract.
+- Request conversion covers instructions, developer/system messages, text input, user images, assistant history, function/custom/namespace tools, Responses Lite `additional_tools`, Tool Call results, tool choice, parallelism, output limits, reasoning effort, and supported text formats.
+- Chat JSON and SSE reconstruction covers reasoning summaries, text output, function calls, custom tool calls, namespace restoration, usage, monotonic event sequence numbers, `response.completed`, and length-to-`response.incomplete` mapping.
+- Function and custom tools cross the existing transparent Tool passthrough boundary before terminal completion; custom freeform input finishes with `response.custom_tool_call_input.done`.
+- Text-before-reasoning interleaving preserves the correct Responses `output_index` for both items.
+- Unsupported hosted/stateful Responses capabilities and unknown content blocks return typed HTTP 400 errors before contacting vLLM.
+- Non-stream Responses JSON, Actionless Completion Recovery, Think Loop Guard, native Responses mode, OpenAI Chat behavior, and Anthropic/Claude Code recovery remain covered.
 
 Not validated in this environment:
 
 - Docker image/container build or execution.
 - Live Codex/Hermes/OpenAI SDK → Gateway → vLLM or Claude Code → Gateway → vLLM integration.
 - Production load, long-duration throughput, and multi-client backpressure behavior.
+- OpenAI-hosted tools, server-side `previous_response_id` state, background Responses, stored Responses, encrypted reasoning persistence, computer use, local-shell specialized items, or compaction items in `chat_adapter` mode.
 
 ```bash
 node --version

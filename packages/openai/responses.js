@@ -5,8 +5,8 @@ function invalid(reason, detail = reason, extra = {}) {
   return { ok: false, reason, detail, ...extra };
 }
 
-function createFunctionCall(id, index = 0) {
-  return { id, index, name: '', arguments: '', parsedArguments: null, argumentError: null, argumentErrorDiagnostics: null, nameFragmentCount: 0, argumentFragmentCount: 0, nameBytes: 0, argumentBytes: 0, argumentsRetainedBytes: 0, argumentsObservationTruncated: false };
+function createFunctionCall(id, index = 0, kind = 'function') {
+  return { id, index, kind, callId: null, name: '', arguments: '', parsedArguments: null, argumentError: null, argumentErrorDiagnostics: null, nameFragmentCount: 0, argumentFragmentCount: 0, nameBytes: 0, argumentBytes: 0, argumentsRetainedBytes: 0, argumentsObservationTruncated: false };
 }
 
 function utf8Prefix(value, maxBytes) {
@@ -25,6 +25,12 @@ function utf8Prefix(value, maxBytes) {
 
 function finalizeCalls(calls) {
   for (const call of calls.values()) {
+    if (call.kind === 'custom') {
+      call.parsedArguments = { __arg1: call.arguments || '' };
+      call.argumentError = null;
+      call.argumentErrorDiagnostics = null;
+      continue;
+    }
     if (call.argumentsObservationTruncated) {
       call.parsedArguments = null;
       call.argumentError = null;
@@ -58,6 +64,7 @@ function collectFunctionCallDiagnostics(functionCalls) {
     index: call.index,
     id: call.id || null,
     name: call.name || 'unknown',
+    kind: call.kind || 'function',
     argumentBytes: call.argumentBytes || 0,
     argumentFragments: call.argumentFragmentCount || 0,
     nameFragments: call.nameFragmentCount || 0,
@@ -206,16 +213,20 @@ class ResponsesStreamParser {
   #ingestOutputItem(item, outputIndex = 0) {
     if (!item || typeof item !== 'object') return;
     const base = { output_index: outputIndex, item_id: item.id || item.call_id || String(outputIndex) };
-    if (item.type === 'function_call') {
+    if (item.type === 'function_call' || item.type === 'custom_tool_call') {
       const id = item.id || item.call_id || String(outputIndex);
-      const call = this.functionCalls.get(id) || createFunctionCall(id, outputIndex);
+      const kind = item.type === 'custom_tool_call' ? 'custom' : 'function';
+      const call = this.functionCalls.get(id) || createFunctionCall(id, outputIndex, kind);
+      call.kind = kind;
+      call.callId = item.call_id || call.callId;
       if (typeof item.name === 'string') {
         this.toolNameBytes += Math.max(0, Buffer.byteLength(item.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
         if (item.name !== call.name) call.nameFragmentCount += 1;
         call.name = item.name;
         call.nameBytes = Buffer.byteLength(item.name, 'utf8');
       }
-      if (typeof item.arguments === 'string') this.#replaceArguments(call, item.arguments);
+      const value = kind === 'custom' ? item.input : item.arguments;
+      if (typeof value === 'string') this.#replaceArguments(call, value);
       this.functionCalls.set(id, call);
       return;
     }
@@ -357,18 +368,43 @@ class ResponsesStreamParser {
     }
     if (type === 'response.output_item.added') {
       const item = payload.item || {};
-      if (item.type === 'function_call') {
+      if (item.type === 'function_call' || item.type === 'custom_tool_call') {
         const id = item.id || item.call_id || String(payload.output_index ?? this.functionCalls.size);
-        const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0);
+        const kind = item.type === 'custom_tool_call' ? 'custom' : 'function';
+        const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0, kind);
+        call.kind = kind;
+        call.callId = item.call_id || call.callId;
         if (typeof item.name === 'string') {
           this.toolNameBytes += Math.max(0, Buffer.byteLength(item.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
           if (item.name !== call.name) call.nameFragmentCount += 1;
           call.name = item.name;
           call.nameBytes = Buffer.byteLength(item.name, 'utf8');
         }
-        if (typeof item.arguments === 'string') this.#replaceArguments(call, item.arguments);
+        const value = kind === 'custom' ? item.input : item.arguments;
+        if (typeof value === 'string') this.#replaceArguments(call, value);
         this.functionCalls.set(id, call);
       }
+      return;
+    }
+    if (type === 'response.custom_tool_call_input.delta') {
+      const id = payload.item_id || payload.call_id || String(payload.output_index ?? 0);
+      const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0, 'custom');
+      call.kind = 'custom';
+      if (typeof payload.delta === 'string') this.#appendArguments(call, payload.delta);
+      this.functionCalls.set(id, call);
+      return;
+    }
+    if (type === 'response.custom_tool_call_input.done') {
+      const id = payload.item_id || payload.call_id || String(payload.output_index ?? 0);
+      const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0, 'custom');
+      call.kind = 'custom';
+      if (typeof payload.name === 'string') {
+        this.toolNameBytes += Math.max(0, Buffer.byteLength(payload.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
+        call.name = payload.name;
+        call.nameBytes = Buffer.byteLength(payload.name, 'utf8');
+      }
+      if (typeof payload.input === 'string') this.#replaceArguments(call, payload.input);
+      this.functionCalls.set(id, call);
       return;
     }
     if (type === 'response.function_call_arguments.delta') {
@@ -460,15 +496,18 @@ function normalizeNonStream(payload) {
         if (content?.type === 'refusal' && typeof content.refusal === 'string') refusalText += content.refusal;
       }
     }
-    if (item?.type === 'function_call') {
+    if (item?.type === 'function_call' || item?.type === 'custom_tool_call') {
       const id = item.id || item.call_id || String(index);
-      const call = createFunctionCall(id, index);
+      const kind = item.type === 'custom_tool_call' ? 'custom' : 'function';
+      const call = createFunctionCall(id, index, kind);
+      call.callId = item.call_id || null;
       call.name = item.name || '';
-      call.arguments = item.arguments || '';
+      call.arguments = kind === 'custom' ? (item.input || '') : (item.arguments || '');
       call.nameFragmentCount = call.name ? 1 : 0;
       call.argumentFragmentCount = call.arguments ? 1 : 0;
       call.nameBytes = Buffer.byteLength(call.name, 'utf8');
       call.argumentBytes = Buffer.byteLength(call.arguments, 'utf8');
+      call.argumentsRetainedBytes = call.argumentBytes;
       functionCalls.set(id, call);
     }
   }
@@ -500,8 +539,8 @@ function validateResult(result, config, requireTerminal) {
     if (!call.name) return invalid('missing_tool_name');
     if (call.argumentsObservationTruncated) continue;
     if (Buffer.byteLength(call.arguments || '', 'utf8') > config.maxToolArgumentBytes) return invalid('tool_argument_limit', 'tool_argument_limit', { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
-    if (call.argumentError) return invalid('malformed_tool_arguments', call.argumentError, { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
-    if (!call.parsedArguments || typeof call.parsedArguments !== 'object' || Array.isArray(call.parsedArguments)) return invalid('invalid_tool_arguments', 'invalid_tool_arguments', { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
+    if (call.kind !== 'custom' && call.argumentError) return invalid('malformed_tool_arguments', call.argumentError, { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
+    if (call.kind !== 'custom' && (!call.parsedArguments || typeof call.parsedArguments !== 'object' || Array.isArray(call.parsedArguments))) return invalid('invalid_tool_arguments', 'invalid_tool_arguments', { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
   }
   if (result.incomplete || result.cancelled) return { ok: true };
   if (!result.outputText?.trim() && !result.refusalText?.trim() && result.functionCalls.size === 0) return invalid('reasoning_without_output');

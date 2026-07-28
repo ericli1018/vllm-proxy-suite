@@ -19,9 +19,11 @@ OpenAI SDK / OpenAI-compatible Client
 - 共用 Loop Detector、Timeout、Cancellation 與最多一次 Recovery 控制。
 - Anthropic Messages 保持完整 Attempt 緩衝、驗證、Recovery 與原始 bytes 回放。
 - OpenAI Chat Completions／Responses 在第一個 Tool Call 前保持 Protected Streaming；第一個 Tool delta 出現後立即切換成透明直送。
+- `/v1/responses` 預設使用 `chat_adapter`：對外維持 Codex Responses protocol，內部轉成 vLLM `/v1/chat/completions`，再重建 Responses JSON／SSE；可切回 `native` 直接呼叫 vLLM Responses。
 - OpenAI Tool commit 後不阻擋、不修補、不拆分、不重寫 Tool arguments，也不再執行 Recovery；Proxy 只保留有界觀測與計數。
 - OpenAI 沒有 Tool Call 的回應仍保留上游原始 response bytes，通過驗證後回放。
 - OpenAI Responses 將 `completed`、`incomplete` 與 `failed` 視為協議終止狀態；terminal event、可見 output、refusal 或 Function Call 具有高於 Think Loop 的優先權，合法結果會原樣回放。`incomplete`（包含只有 reasoning 的 `max_output_tokens` 結果）以原始 HTTP 200／SSE bytes 回放，不改寫成 Proxy 錯誤。
+- OpenAI Responses 若在工具可用時只以第一人稱承諾「接下來要執行」，卻以 `response.completed` 結束且沒有 Function Call，會觸發一次 Actionless Completion Recovery；Recovery 強制 `tool_choice="required"` 與非平行單一工具。第二次仍無工具則 fail closed，且 `retryable=false`。
 - OpenAI Recovery 只在 Tool commit 前使用當次 request 真正提供的網路查詢或下載工具，不預設固定工具名稱。
 - OpenAI Chat 的 System Message 契約固定為最多一個且只能位於 `messages[0]`；Proxy 產生 Recovery 時會合併至該開頭訊息，Client 提供中途 System Message 則在進入 vLLM 前回傳明確 `400`。
 - Claude Code Tool Recovery 只載入 Anthropic runtime，不會影響 OpenAI API。
@@ -33,7 +35,7 @@ OpenAI SDK / OpenAI-compatible Client
 | `POST /v1/messages` | Anthropic | Messages Guard、Loop Recovery、Claude Code Tool Recovery |
 | `/v1/messages/count_tokens` | Anthropic | 透明穿透 |
 | `POST /v1/chat/completions` | OpenAI | Pre-Tool Think Guard；Tool Call 透明直送 |
-| `POST /v1/responses` | OpenAI | Pre-Tool Think Guard；Function Call 透明直送 |
+| `POST /v1/responses` | OpenAI | Responses façade；預設轉 Chat upstream；Pre-Tool Think Guard；Function/Custom Tool 透明直送 |
 | 其他 `/v1/*` | OpenAI | 透明穿透 |
 | 其他路徑 | Gateway | `404` |
 
@@ -191,6 +193,62 @@ curl http://127.0.0.1:3456/v1/models \
   -H "Authorization: Bearer $VLLM_OPENAI_PROXY_API_KEY"
 ```
 
+### Responses upstream 模式
+
+Codex 對外固定使用：
+
+```text
+POST /v1/responses
+```
+
+Proxy 提供兩種 upstream mode：
+
+```text
+chat_adapter（預設）
+Codex Responses
+→ Proxy request normalization
+→ vLLM /v1/chat/completions
+→ Proxy Responses JSON/SSE encoder
+→ Codex
+
+native
+Codex Responses
+→ vLLM /v1/responses
+→ 原有 Responses guard/replay
+```
+
+設定：
+
+```env
+VLLM_PROXY_RESPONSES_UPSTREAM_MODE=chat_adapter
+# 或 native
+```
+
+`chat_adapter` 支援：
+
+- stream 與 non-stream。
+- `instructions`、developer/system/user/assistant message history。
+- user `input_text` 與 `input_image`，後者轉為 Chat `image_url`。
+- Function tools、Custom tools、Namespace tools。
+- Codex Responses Lite `additional_tools`，會正規化並合併至可呼叫工具集合。
+- `function_call`／`function_call_output` 與 `custom_tool_call`／`custom_tool_call_output` history。
+- `tool_choice=auto|required|none` 與指定 Function。
+- `parallel_tool_calls`、`max_output_tokens`、temperature、top-p、seed、reasoning effort、JSON response format。
+- Chat reasoning/content/Tool Call/usage 轉回 Responses lifecycle。
+- Chat `finish_reason=length` 轉為 `response.incomplete`，reason 為 `max_output_tokens`。
+- Custom Tool 在第一個 Chat Tool fragment 即建立 `custom_tool_call` item，讓 Tool passthrough 不必等待完整 freeform input。
+
+`chat_adapter` 會在接觸 vLLM 前，以明確 HTTP 400 拒絕無法安全降級的功能，包括：
+
+- `previous_response_id`。
+- `background=true`。
+- `store=true`。
+- OpenAI hosted web/file search、Code Interpreter、Computer Use、Image Generation 等非 Client function/custom/namespace tools。
+- 尚未映射的 specialized input item，例如 compaction、shell/local-shell、hosted MCP lifecycle item。
+- 未支援的 content block。
+
+需要上述原生 Responses 功能時，改用 `native`；不要在已開始生成後自動 fallback，以避免重複 Tool action。
+
 ### Responses API 終止狀態
 
 `POST /v1/responses` 支援 stream 與 non-stream。Proxy 接受並保留以下合法終止狀態：
@@ -214,6 +272,37 @@ Client 應依 `status` 與 `incomplete_details` 決定是否提高 `max_output_t
 Proxy 解析並觀測官方 Responses done/final events，包括 reasoning、summary、output text、refusal 與 function-call arguments；即使沒有先行 delta，terminal response 的完整 `output[]` 仍可作為權威結果。
 
 Responses Think Loop Guard 只在模型仍處於純 reasoning、尚未產生 output/refusal/Function Call、且尚未收到 terminal event 時啟用。一旦任一 action boundary 出現，後續 reasoning 即使包含重複片段，也不能覆蓋合法 `response.completed`。這可避免 Codex 已有完整 terminal event，Proxy 卻丟棄它並造成 `stream closed before response.completed`。
+
+### Responses Actionless Completion Guard
+
+此 Guard 與 Think Loop 分離，只處理以下完整條件：
+
+```text
+response.status="completed"
+request tools[] 非空
+tool_choice 不是 none
+回應沒有 Function Call
+回應文字以第一人稱承諾立即開始／建立／執行等工作
+```
+
+初次命中時，Proxy 丟棄該段進度宣告並進行一次策略型 Recovery：
+
+```text
+保留原 tools[]
+tool_choice="required"
+parallel_tool_calls=false
+要求立即呼叫一個適當工具
+禁止在工具前再次輸出進度宣告
+```
+
+若 Recovery 仍只輸出文字而沒有工具，Proxy 回傳：
+
+```text
+reason="actionless_completion"
+retryable=false
+```
+
+下列情況不會觸發：沒有工具、`tool_choice="none"`、`status="incomplete"`／`cancelled`、已產生 Function Call、正常最終答案，以及不含第一人稱執行承諾的一般步驟說明。可用 `ACTIONLESS_COMPLETION_GUARD_ENABLED=false` 停用。
 
 ## Loop Guard 與 OpenAI Tool Passthrough
 
@@ -335,6 +424,8 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `LOOP_MAX_PATTERN_SIZE` | `2048` |
 | `LOOP_MIN_COUNT` | `3`，exact／normalized／ABAB 三種偵測都必須達到此重複次數 |
 | `LOOP_REASONING_CHAR_LIMIT` | `24000` |
+| `RESPONSES_UPSTREAM_MODE` | `chat_adapter`；可設為 `native`。Compose 對外變數為 `VLLM_PROXY_RESPONSES_UPSTREAM_MODE` |
+| `ACTIONLESS_COMPLETION_GUARD_ENABLED` | `true`，只套用 `/v1/responses` 的敘述但未行動完成防護 |
 | `TOTAL_GENERATION_TIMEOUT_MS` | `1800000` |
 | `RECOVERY_TIMEOUT_MS` | `900000` |
 | `MAX_ACTIVE_REQUESTS` | `256`，每個 protocol runtime 各自計算 |
@@ -394,7 +485,8 @@ npm run check
 - Tool commit 前的 reasoning 仍採 Protected Streaming，因此第一個正式 token 會有延遲。
 - 兩個 protocol runtime 共用同一個 Node.js heap；任一模組造成 process-level OOM 都會影響整套服務。
 - 兩個 runtime 的 Buffer Budget 與 active-request counter 各自獨立，因此 `MAX_TOTAL_BUFFERED_BYTES` 是每個 runtime 的限制，不是 process 合計。
-- `/v1/responses` 未辨識的新事件會保留在原始 SSE bytes，但不一定計入語意進度。
+- `native` 模式下，`/v1/responses` 未辨識的新事件會保留在原始 SSE bytes，但不一定計入語意進度。
+- `chat_adapter` 是明確的 Text/Image + Client Tool 相容層，不等同完整 OpenAI hosted Responses runtime；不支援項目會在 upstream 前回傳 400。
 - 詳細限制見 `docs/known-limitations.md`。
 - 尚未在本環境完成真實 Claude Code／Hermes／OpenAI SDK → Gateway → vLLM 整合。
 

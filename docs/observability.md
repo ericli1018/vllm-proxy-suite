@@ -91,6 +91,41 @@ Responses:        output:<index>/call:<id>
 Anthropic:        block:<index>
 ```
 
+
+## Responses upstream mode diagnostics
+
+Every guarded `/v1/responses` request includes the safe field:
+
+```text
+responsesUpstreamMode="chat_adapter"
+# or "native"
+```
+
+In `chat_adapter` mode, upstream network traffic goes to `/v1/chat/completions`, but all attempt/replay/Tool lifecycle logs remain protocol=`vllm_openai_proxy`, path=`/v1/responses` because the route-scoped adapter reconstructs Responses before the common attempt runner observes it.
+
+Unsupported adapter features terminate before upstream contact:
+
+```text
+request_rejected status=400 reason="unsupported_responses_tool"
+request_rejected status=400 reason="unsupported_previous_response_id"
+request_rejected status=400 reason="unsupported_responses_input_item"
+```
+
+`request_tool_context` is emitted after Responses Lite `additional_tools` normalization, so its tool count/names include dynamically supplied Function, Custom and Namespace tools without logging their schemas.
+
+For a Custom Tool, the expected sequence is:
+
+```text
+response.output_item.added type=custom_tool_call
+tool_passthrough_started
+...
+response.custom_tool_call_input.done
+response.output_item.done
+response.completed
+```
+
+This early item announcement preserves the same irreversible Tool boundary used by ordinary Function Calls.
+
 ## Responses Think Loop action boundary
 
 For `/v1/responses`, `loop_detected` is permitted only while the Attempt contains reasoning and no action or terminal marker. The guard closes when any visible output/refusal, Function Call, or response terminal event is observed.
@@ -359,3 +394,46 @@ LOG_TOOL_PAYLOADS=true
 ```
 
 the Proxy emits a truncated preview with common credential fields redacted. This may still expose project data and should only be enabled for controlled debugging. Set `TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES=0` when no in-memory Tool argument prefix should be retained after commit.
+
+## Responses request tools and actionless completion
+
+At debug level, every guarded OpenAI request emits a schema-free tool summary:
+
+```text
+request_tool_context
+requestToolCount=...
+requestToolNames=[...]
+requestToolChoice="auto|required|none|function:<name>"
+requestToolsEnabled=true|false
+parallelToolCallsRequested=true|false|null
+```
+
+When a completed Responses result only promises future execution and emits no Function Call:
+
+```text
+actionless_completion_detected
+attempt=1
+retryable=true
+
+recovery_request_built
+recoveryMode="action_required"
+forcedToolChoice="required"
+```
+
+If the one required-tool Recovery still emits no Function Call:
+
+```text
+actionless_completion_fused
+attempt=2
+retryable=false
+```
+
+Prometheus counters:
+
+```text
+*_actionless_completions_detected_total
+*_actionless_recoveries_fused_total
+```
+
+These diagnostics contain tool names and counts only; Tool schemas and generated text are not logged.
+

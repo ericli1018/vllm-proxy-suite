@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.8 - 2026-07-28
+
+- Added selectable Responses upstream modes: `chat_adapter` (default) and `native`. Codex continues to call `/v1/responses`; adapter mode calls vLLM `/v1/chat/completions` internally and reconstructs Responses JSON/SSE.
+- Added deterministic Responses request conversion for instructions, developer/system messages, text and image inputs, function/custom/namespace tools, `additional_tools`, Tool Call history/results, tool choice, parallelism, output limits, reasoning effort, and text formats.
+- Added Chat-to-Responses JSON/SSE reconstruction for reasoning summaries, output text, function calls, custom tool calls, usage, monotonic sequence numbers, `response.completed`, and length-to-`response.incomplete` mapping.
+- Added Codex custom-tool support for `apply_patch`-style freeform input. Custom tools cross the transparent Tool commit boundary at the first Chat tool fragment and finish with native `response.custom_tool_call_input.done`.
+- Added namespace-tool flattening for Chat upstreams and namespace/name restoration for Codex Tool dispatch, including Responses Lite `additional_tools` normalization.
+- Added explicit pre-upstream HTTP 400 errors for unsupported hosted/stateful Responses features instead of converting adapter failures into retryable 502 transport errors.
+- Preserved the existing Think Loop Guard, Actionless Completion Recovery, Tool passthrough, Responses terminal handling, native mode, OpenAI Chat behavior, and Anthropic/Claude Code recovery.
+
+## 0.5.7 - 2026-07-28
+
+- Added a Responses-only Actionless Completion Guard for completed replies that narrate immediate future work while tools are available but emit no Function Call.
+- Added request tool-context diagnostics without logging schemas: tool count, names, normalized `tool_choice`, enabled state, and requested parallelism.
+- Added one strategy-aware Recovery that preserves the request tools, sets `tool_choice="required"`, disables parallel calls, and instructs the model to issue exactly one tool call without another progress announcement.
+- Added a strict fuse: if the required-tool Recovery still returns text without a Function Call, the Proxy returns `actionless_completion` with `retryable:false` and performs no additional Recovery.
+- Added conservative first-person action-narration detection in Traditional Chinese and English, including short prefaces such as “Now I have enough data. Let me create…”, while leaving generic procedural explanations such as “首先建立…” untouched.
+- Added `ACTIONLESS_COMPLETION_GUARD_ENABLED`, dedicated lifecycle events, Prometheus counters, and end-to-end Responses regressions.
+
 ## 0.5.6 - 2026-07-28
 
 - Fixed successful `/v1/responses` terminal results being overridden by `repeated_reasoning_segment`, which discarded valid `response.completed` events and caused Codex to report `stream closed before response.completed`.

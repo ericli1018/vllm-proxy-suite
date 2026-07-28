@@ -47,6 +47,21 @@ A valid completed response is replayed even if its preceding reasoning contains 
 
 Before an action boundary, exact suffix, normalized suffix, and ABAB line-cycle detection all require `LOOP_MIN_COUNT` repetitions. The default is `3`; two repeats alone are not treated as a loop.
 
+## Responses actionless-completion recovery
+
+A valid terminal response can still be an invalid agent transition when all of these are true:
+
+```text
+status=completed
+tools are available and tool_choice is not none
+no Function Call was emitted
+visible text is a narrow first-person promise to begin work
+```
+
+The original narration is discarded. The single Recovery slot preserves all request tools, forces `tool_choice="required"`, sets `parallel_tool_calls=false`, and requests exactly one immediate tool call. This mode does not use network-tool filtering.
+
+If the Recovery still contains no Function Call, `actionless_completion` is returned with `retryable:false`. The Proxy never performs a third Attempt. Normal final answers, generic procedural explanations, incomplete/cancelled responses, requests without tools, and requests with `tool_choice="none"` are not candidates.
+
 ## OpenAI Chat System Message contract
 
 For `/v1/chat/completions`, a System Message is optional, but when present it must be the only System Message and must occupy `messages[0]`.
@@ -103,3 +118,13 @@ too_many_tool_calls
 ```
 
 OpenAI Tool Calls are different: after the transparent commit boundary, these conditions are observe-only diagnostics and cannot trigger blocking or Recovery. The client receives the original upstream stream and owns Tool aggregation, validation, execution, and retry policy.
+
+## Responses Chat-adapter recovery
+
+Recovery bodies remain expressed in Responses form. In `chat_adapter` mode each initial or Recovery attempt is independently normalized and converted to Chat Completions immediately before the upstream fetch. This preserves the existing policy invariants:
+
+- Think Loop Recovery still modifies `instructions`, not Chat history directly.
+- Actionless Recovery still sets Responses `tool_choice="required"` and `parallel_tool_calls=false`; the adapter maps those values to the second Chat request.
+- Function, Custom, Namespace and `additional_tools` definitions remain available during Recovery.
+- Once the reconstructed Responses stream announces a Tool item, the common transparent Tool commit boundary disables further Recovery.
+- Adapter request-validation errors are non-generation HTTP 400 failures and are never sent as retryable upstream transport errors.

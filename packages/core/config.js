@@ -65,6 +65,7 @@ export function loadCommonConfig(env = process.env, defaults = {}) {
     loopMinCount: parseInteger(env.LOOP_MIN_COUNT, 3, { min: 2 }),
     loopReasoningCharLimit: parseInteger(env.LOOP_REASONING_CHAR_LIMIT, 24000, { min: 128 }),
     loopScanIntervalChars: parseInteger(env.LOOP_SCAN_INTERVAL_CHARS, 64, { min: 8 }),
+    actionlessCompletionGuardEnabled: parseBoolean(env.ACTIONLESS_COMPLETION_GUARD_ENABLED, true),
     logLevel: env.LOG_LEVEL || defaults.logLevel || 'info',
     logFormat: env.LOG_FORMAT || defaults.logFormat || 'json',
     progressLogIntervalMs: parseInteger(env.PROGRESS_LOG_INTERVAL_MS, 10000, { min: 1000 }),

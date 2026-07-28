@@ -112,3 +112,28 @@ https://github.com/ericli1018/vllm-proxy-suite.git
 ```
 
 It then runs `node /app/vllm-proxy-suite.js`. The included Dockerfile remains available for immutable image builds.
+
+## Responses upstream adapter boundary
+
+`/v1/responses` 有兩個固定配置模式：
+
+```text
+RESPONSES_UPSTREAM_MODE=chat_adapter
+Responses frontend
+→ normalize Responses Lite additional_tools
+→ canonical message/tool mapping
+→ Chat Completions upstream
+→ Responses event encoder
+→ existing Responses parser/guards/delivery
+
+RESPONSES_UPSTREAM_MODE=native
+Responses frontend
+→ native vLLM Responses upstream
+→ existing Responses parser/guards/delivery
+```
+
+The route-scoped fetch adapter sits below the existing attempt runner. The attempt runner therefore continues to see standard Responses JSON/SSE in both modes, so Think Loop eligibility, Actionless Completion validation, transparent Tool commit, replay, cancellation, timeouts and metrics do not need a second implementation.
+
+The adapter uses a request-local mapping table to flatten namespace tools for Chat upstreams and restore `(namespace, name)` in Responses function calls. Custom tools are represented upstream as strict wrapper functions with a single freeform `__arg1` string; the encoder restores native `custom_tool_call` items.
+
+There is no automatic native-to-chat fallback after an attempt starts. A deployment selects one mode per runtime to prevent duplicate inference or duplicate Tool side effects.

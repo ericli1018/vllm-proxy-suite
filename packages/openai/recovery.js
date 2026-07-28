@@ -62,8 +62,20 @@ function appendInstruction(body, api, text) {
   return 'inserted_leading_system';
 }
 
+function actionRequiredInstruction(reason) {
+  return [
+    'The previous response completed without calling any tool after describing future actions.',
+    'Do not repeat the plan or a progress announcement.',
+    'Call exactly one appropriate available tool now to begin execution.',
+    'Do not return text before the tool call.',
+    'Wait for the tool result before continuing.',
+    `Recovery reason: ${reason}.`,
+  ].join(' ');
+}
+
 function recoveryInstruction(reason, plan) {
-  const network = plan?.mode && plan.mode !== 'none'
+  if (plan?.mode === 'action_required') return actionRequiredInstruction(reason);
+  const network = typeof plan?.mode === 'string' && plan.mode.startsWith('network_')
     ? `Use exactly one available ${plan.mode.replace('network_', '')} tool to create new external evidence.`
     : 'Use an available evidence-producing action or provide a final answer from already accepted evidence.';
   return [
@@ -83,7 +95,8 @@ function capNumber(value, cap, fallback = cap) {
 
 export function buildOpenAiRecoveryRequest(original, { api, reason, plan, config }) {
   const body = structuredClone(original);
-  const network = plan?.mode && plan.mode !== 'none';
+  const network = typeof plan?.mode === 'string' && plan.mode.startsWith('network_');
+  const actionRequired = plan?.mode === 'action_required';
   const temperatureCap = network ? config.recoveryNetworkTemperatureMax : config.recoveryTemperatureMax;
   const tokenCap = network ? config.recoveryNetworkMaxTokens : config.recoveryMaxTokens;
   body.temperature = capNumber(body.temperature, temperatureCap);
@@ -96,7 +109,10 @@ export function buildOpenAiRecoveryRequest(original, { api, reason, plan, config
   }
   appendInstruction(body, api, recoveryInstruction(reason, plan));
 
-  if (network) {
+  if (actionRequired) {
+    body.tool_choice = 'required';
+    body.parallel_tool_calls = false;
+  } else if (network) {
     const allowed = new Set(plan.candidateNames);
     body.tools = (body.tools || []).filter((tool) => allowed.has(toolName(tool)));
     if (plan.candidateNames.length === 1) {
@@ -113,6 +129,18 @@ export function buildOpenAiRecoveryRequest(original, { api, reason, plan, config
 
 export function validateForcedToolRecovery(output, plan) {
   if (!plan || plan.mode === 'none') return { ok: true };
+  if (plan.mode === 'action_required' && (output.finalText?.trim() || output.toolCalls.length !== 1)) {
+    return {
+      ok: false,
+      reason: 'actionless_completion',
+      retryable: false,
+      diagnostics: {
+        actionlessRecoveryAttempted: true,
+        recoveryToolCallCount: output.toolCalls.length,
+        recoveryFinalTextChars: output.finalText?.trim()?.length || 0,
+      },
+    };
+  }
   if (output.finalText?.trim() || output.toolCalls.length !== 1) return { ok: false, reason: 'forced_tool_call_required' };
   const tool = output.toolCalls[0];
   if (!plan.candidateNames.includes(tool.name)) return { ok: false, reason: 'unexpected_recovery_tool' };

@@ -42,6 +42,8 @@ function createMetrics() {
     toolPassthroughCompletedTotal: 0,
     toolPassthroughInterruptionsTotal: 0,
     toolPassthroughValidationWarningsTotal: 0,
+    actionlessCompletionsDetectedTotal: 0,
+    actionlessRecoveriesFusedTotal: 0,
   };
 }
 
@@ -418,6 +420,20 @@ export function createProtocolProxyRuntime({
           error?.details || {},
         ));
       }
+      if (route.requestDiagnostics) {
+        requestLogger.debug('request_tool_context', route.requestDiagnostics(firstBody, { originalBody, config }) || {});
+      }
+      const recordActionlessCompletion = (validation, attemptNumber, recovery) => {
+        if (validation?.reason !== 'actionless_completion') return;
+        metrics.actionlessCompletionsDetectedTotal += 1;
+        if (recovery) metrics.actionlessRecoveriesFusedTotal += 1;
+        requestLogger.warn(recovery ? 'actionless_completion_fused' : 'actionless_completion_detected', {
+          attempt: attemptNumber,
+          phase: recovery ? 'recovery' : 'initial',
+          retryable: validation.retryable ?? !recovery,
+          ...(validation.diagnostics || {}),
+        });
+      };
       const streaming = Boolean(firstBody.stream);
       const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
       let toolPassthroughDelivery = null;
@@ -516,7 +532,7 @@ export function createProtocolProxyRuntime({
         };
       };
       const attemptArgs = {
-        fetchImpl,
+        fetchImpl: route.fetchImpl || fetchImpl,
         url: `${config.vllmBaseUrl}${parsedUrl.pathname}${parsedUrl.search}`,
         headers: buildUpstreamHeaders(request, config, requestId),
         streaming,
@@ -538,12 +554,15 @@ export function createProtocolProxyRuntime({
       if (attempt.kind === 'success' && route.validateAttempt) {
         const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody, config });
         if (!semanticValidation.ok) {
+          recordActionlessCompletion(semanticValidation, 1, false);
           attempt = {
             ...attempt,
             kind: 'invalid',
             reason: semanticValidation.reason || 'semantic_validation_failed',
             detail: semanticValidation.detail,
             context: semanticValidation.context,
+            retryable: semanticValidation.retryable,
+            diagnostics: semanticValidation.diagnostics,
             validation: semanticValidation,
           };
         }
@@ -599,19 +618,25 @@ export function createProtocolProxyRuntime({
         if (attempt.kind === 'success' && route.validateAttempt) {
           const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody: recovery.body, config, recovery: true });
           if (!semanticValidation.ok) {
+            recordActionlessCompletion(semanticValidation, 2, true);
             attempt = {
               ...attempt,
               kind: 'invalid',
               reason: semanticValidation.reason || 'semantic_validation_failed',
               detail: semanticValidation.detail,
               context: semanticValidation.context,
+              retryable: semanticValidation.retryable,
+              diagnostics: semanticValidation.diagnostics,
               validation: semanticValidation,
             };
           }
         }
         if (attempt.kind === 'success' && route.validateRecovery) {
           const recoveryValidation = route.validateRecovery(attempt, recovery);
-          if (!recoveryValidation.ok) attempt = { kind: 'invalid', ...recoveryValidation, result: attempt.result };
+          if (!recoveryValidation.ok) {
+            recordActionlessCompletion(recoveryValidation, 2, recovery.plan?.mode === 'action_required');
+            attempt = { kind: 'invalid', ...recoveryValidation, result: attempt.result };
+          }
         }
         if (attempt.kind === 'success' || attempt.kind === 'tool_passthrough') {
           metrics.recoverySuccessTotal += 1;

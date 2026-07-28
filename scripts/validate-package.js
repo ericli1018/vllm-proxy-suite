@@ -25,13 +25,17 @@ const required = [
   'packages/anthropic/messages.js',
   'packages/anthropic/claude-code-tools/recovery.js',
   'packages/openai/chat-completions.js',
+  'packages/openai/actionless-completion.js',
   'packages/openai/responses.js',
+  'packages/openai/responses-chat-adapter.js',
   'packages/openai/recovery.js',
   'packages/openai/tool-classifier.js',
   'packages/server/create-proxy-server.js',
   'test/tool-passthrough-v053.test.js',
   'test/responses-support-v055.test.js',
   'test/loop-terminal-v056.test.js',
+  'test/actionless-completion-v057.test.js',
+  'test/responses-chat-adapter-v058.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -56,7 +60,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.5.6') errors.push('package.json version must be 0.5.6');
+if (packageJson.version !== '0.5.8') errors.push('package.json version must be 0.5.8');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -83,6 +87,9 @@ if (!compose.includes('TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES')) errors.push('Co
 if (!compose.includes('CLIENT_RETRY_FINGERPRINT_TTL_MS')) errors.push('Compose must expose client retry fingerprint TTL');
 if (!compose.includes('CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES')) errors.push('Compose must expose client retry fingerprint capacity');
 if (!compose.includes('LOOP_MIN_COUNT: "3"')) errors.push('Compose must default LOOP_MIN_COUNT to 3');
+if (!compose.includes('RESPONSES_UPSTREAM_MODE')) errors.push('Compose must expose the Responses upstream mode');
+if (!compose.includes('${VLLM_PROXY_RESPONSES_UPSTREAM_MODE:-chat_adapter}')) errors.push('Compose must default Responses upstream mode to chat_adapter');
+if (!compose.includes('ACTIONLESS_COMPLETION_GUARD_ENABLED')) errors.push('Compose must expose the Responses actionless-completion guard switch');
 
 const servicesPart = compose.split(/^services:\s*$/m)[1] || '';
 const serviceNames = [...servicesPart.matchAll(/^  ([a-zA-Z0-9_-]+):$/gm)].map((match) => match[1]);
@@ -103,6 +110,9 @@ if (!gateway.includes('createOpenAiProxyRuntime')) errors.push('Gateway must loa
 
 const openAiRuntime = readFileSync(resolve(root, 'apps/vllm-openai-proxy/server.js'), 'utf8');
 if (!openAiRuntime.includes('transparentToolPassthrough: true')) errors.push('OpenAI guarded routes must enable transparent Tool passthrough');
+if (!openAiRuntime.includes('detectActionlessCompletion')) errors.push('OpenAI runtime must enable Responses actionless-completion detection');
+if (!openAiRuntime.includes('createResponsesChatAdapterFetch')) errors.push('OpenAI runtime must support the Responses-to-Chat upstream adapter');
+if (!openAiRuntime.includes("responsesUpstreamMode")) errors.push('OpenAI runtime must expose the Responses upstream mode');
 
 function collect(directory, output = []) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {

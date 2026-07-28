@@ -32,6 +32,8 @@ ORIGINAL_ATTEMPT
 
 If an OpenAI Recovery generation emits a Tool Call, that Recovery response crosses the same transparent commit boundary. Post-generation forced-Tool validation cannot revoke bytes already delivered.
 
+For `/v1/responses`, a terminal `status="incomplete"` or `status="cancelled"` is protocol-valid even when it contains only reasoning and no visible output. It is replayed unchanged and does not trigger `reasoning_without_output` Recovery. The official `response.incomplete` event and the vLLM variant `response.completed` with an embedded incomplete status are treated equivalently. `status="failed"` and explicit upstream errors remain invalid.
+
 ## OpenAI Chat System Message contract
 
 For `/v1/chat/completions`, a System Message is optional, but when present it must be the only System Message and must occupy `messages[0]`.

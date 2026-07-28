@@ -13,4 +13,5 @@
 11. The Proxy does not parse Bash commands. Any Bash Tool Result conservatively invalidates prior Read freshness.
 12. Unknown SSE events are preserved by protected replay or transparent streaming but may not contribute to Loop Detection or semantic progress.
 13. Runtime Git synchronization force-resets the named volume to the configured ref on container start. Pin `VLLM_PROXY_SUITE_REF` or build the Dockerfile for immutable deployment.
-14. Live integration with the target vLLM, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
+14. A valid Responses `status="incomplete"` is delivered unchanged. The Proxy does not automatically continue the response, increase `max_output_tokens`, or synthesize visible output from reasoning; the Client owns continuation policy.
+15. Live integration with the target vLLM, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.

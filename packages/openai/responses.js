@@ -92,10 +92,18 @@ function normalizedUsage(usage) {
 
 function collectCompletionDiagnostics(result) {
   const response = result?.response || result?.payload || null;
+  const status = response?.status ?? null;
+  const incompleteDetails = response?.incomplete_details ?? null;
   return {
+    responseTerminal: typeof result?.terminal === 'boolean' ? result.terminal : null,
+    responseTerminalEvent: result?.terminalEvent ?? null,
     responseCompleted: typeof result?.completed === 'boolean' ? result.completed : null,
+    responseIncomplete: typeof result?.incomplete === 'boolean' ? result.incomplete : null,
+    responseCancelled: typeof result?.cancelled === 'boolean' ? result.cancelled : null,
     responseFailed: typeof result?.failed === 'boolean' ? result.failed : null,
-    responseStatus: response?.status ?? null,
+    responseStatus: status,
+    responseIncompleteReason: incompleteDetails?.reason ?? null,
+    responseIncompleteDetails: incompleteDetails,
     ...normalizedUsage(response?.usage || result?.payload?.usage),
   };
 }
@@ -127,12 +135,20 @@ function malformedCallDiagnostics(functionCalls, call) {
 class ResponsesStreamParser {
   constructor(config = {}) {
     this.decoder = new SseFrameDecoder();
+    this.terminal = false;
+    this.terminalEvent = null;
     this.completed = false;
+    this.incomplete = false;
+    this.cancelled = false;
     this.failed = false;
     this.error = null;
     this.structuralErrors = [];
     this.reasoning = '';
     this.outputText = '';
+    this.refusalText = '';
+    this.reasoningParts = new Map();
+    this.outputTextParts = new Map();
+    this.refusalParts = new Map();
     this.functionCalls = new Map();
     this.eventCount = 0;
     this.response = null;
@@ -144,6 +160,81 @@ class ResponsesStreamParser {
     this.toolPassthroughObservationMaxBytes = Number.isFinite(config.toolPassthroughObservationMaxBytes)
       ? Math.max(0, config.toolPassthroughObservationMaxBytes)
       : 64 * 1024;
+  }
+
+  #contentKey(payload, kind) {
+    return `${kind}:${payload?.output_index ?? 0}:${payload?.item_id ?? 'unknown'}:${payload?.content_index ?? payload?.summary_index ?? 0}`;
+  }
+
+  #syncText(target, property) {
+    this[property] = [...target.values()].join('');
+  }
+
+  #appendText(target, property, payload, kind, value) {
+    if (typeof value !== 'string') return;
+    const key = this.#contentKey(payload, kind);
+    target.set(key, `${target.get(key) || ''}${value}`);
+    this.#syncText(target, property);
+  }
+
+  #replaceText(target, property, payload, kind, value) {
+    if (typeof value !== 'string') return;
+    target.set(this.#contentKey(payload, kind), value);
+    this.#syncText(target, property);
+  }
+
+  #replaceTrackedText(target, property, metricProperty, payload, kind, value) {
+    const previousBytes = Buffer.byteLength(this[property] || '', 'utf8');
+    this.#replaceText(target, property, payload, kind, value);
+    const nextBytes = Buffer.byteLength(this[property] || '', 'utf8');
+    this[metricProperty] += Math.max(0, nextBytes - previousBytes);
+  }
+
+  #setTerminal(type, response = null) {
+    this.terminal = true;
+    this.terminalEvent = type;
+    if (response) this.response = response;
+    const status = response?.status || (type === 'response.incomplete' ? 'incomplete' : type === 'response.failed' ? 'failed' : type === 'response.completed' ? 'completed' : null);
+    this.completed = status === 'completed';
+    this.incomplete = status === 'incomplete';
+    this.cancelled = status === 'cancelled';
+    this.failed = status === 'failed';
+    if (this.failed) this.error = response?.error || this.error;
+    for (const [outputIndex, item] of (response?.output || []).entries()) this.#ingestOutputItem(item, outputIndex);
+  }
+
+  #ingestOutputItem(item, outputIndex = 0) {
+    if (!item || typeof item !== 'object') return;
+    const base = { output_index: outputIndex, item_id: item.id || item.call_id || String(outputIndex) };
+    if (item.type === 'function_call') {
+      const id = item.id || item.call_id || String(outputIndex);
+      const call = this.functionCalls.get(id) || createFunctionCall(id, outputIndex);
+      if (typeof item.name === 'string') {
+        this.toolNameBytes += Math.max(0, Buffer.byteLength(item.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
+        if (item.name !== call.name) call.nameFragmentCount += 1;
+        call.name = item.name;
+        call.nameBytes = Buffer.byteLength(item.name, 'utf8');
+      }
+      if (typeof item.arguments === 'string') this.#replaceArguments(call, item.arguments);
+      this.functionCalls.set(id, call);
+      return;
+    }
+    if (item.type === 'reasoning') {
+      for (const [summaryIndex, entry] of (item.summary || []).entries()) {
+        if (typeof entry?.text === 'string') this.#replaceTrackedText(this.reasoningParts, 'reasoning', 'reasoningBytes', { ...base, summary_index: summaryIndex }, 'reasoning_summary', entry.text);
+      }
+      for (const [contentIndex, entry] of (item.content || []).entries()) {
+        if (entry?.type?.includes('reasoning') && typeof entry.text === 'string') this.#replaceTrackedText(this.reasoningParts, 'reasoning', 'reasoningBytes', { ...base, content_index: contentIndex }, 'reasoning_text', entry.text);
+      }
+      return;
+    }
+    if (item.type === 'message') {
+      for (const [contentIndex, content] of (item.content || []).entries()) {
+        const contentPayload = { ...base, content_index: contentIndex };
+        if (content?.type === 'output_text' && typeof content.text === 'string') this.#replaceTrackedText(this.outputTextParts, 'outputText', 'contentBytes', contentPayload, 'output_text', content.text);
+        if (content?.type === 'refusal' && typeof content.refusal === 'string') this.#replaceTrackedText(this.refusalParts, 'refusalText', 'contentBytes', contentPayload, 'refusal', content.refusal);
+      }
+    }
   }
 
   enableToolPassthroughObservation(maxBytes = this.toolPassthroughObservationMaxBytes) {
@@ -219,29 +310,49 @@ class ResponsesStreamParser {
     }
     this.eventCount += 1;
     const type = payload?.type || frame.event;
-    if (type === 'error' || type === 'response.failed') {
+    if (type === 'error') {
+      this.terminal = true;
+      this.terminalEvent = type;
       this.failed = true;
       this.error = payload?.error || payload?.response?.error || payload;
       if (payload?.response) this.response = payload.response;
       return;
     }
-    if (type === 'response.completed') {
-      this.completed = true;
-      this.response = payload.response || null;
+    if (type === 'response.completed' || type === 'response.incomplete' || type === 'response.failed') {
+      this.#setTerminal(type, payload.response || null);
       return;
     }
     if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') {
       if (typeof payload.delta === 'string') {
-        this.reasoning += payload.delta;
+        this.#appendText(this.reasoningParts, 'reasoning', payload, type.includes('summary') ? 'reasoning_summary' : 'reasoning_text', payload.delta);
         this.reasoningBytes += Buffer.byteLength(payload.delta, 'utf8');
       }
       return;
     }
+    if (type === 'response.reasoning_summary_text.done' || type === 'response.reasoning_text.done') {
+      this.#replaceTrackedText(this.reasoningParts, 'reasoning', 'reasoningBytes', payload, type.includes('summary') ? 'reasoning_summary' : 'reasoning_text', payload.text);
+      return;
+    }
     if (type === 'response.output_text.delta') {
       if (typeof payload.delta === 'string') {
-        this.outputText += payload.delta;
+        this.#appendText(this.outputTextParts, 'outputText', payload, 'output_text', payload.delta);
         this.contentBytes += Buffer.byteLength(payload.delta, 'utf8');
       }
+      return;
+    }
+    if (type === 'response.output_text.done') {
+      this.#replaceTrackedText(this.outputTextParts, 'outputText', 'contentBytes', payload, 'output_text', payload.text);
+      return;
+    }
+    if (type === 'response.refusal.delta') {
+      if (typeof payload.delta === 'string') {
+        this.#appendText(this.refusalParts, 'refusalText', payload, 'refusal', payload.delta);
+        this.contentBytes += Buffer.byteLength(payload.delta, 'utf8');
+      }
+      return;
+    }
+    if (type === 'response.refusal.done') {
+      this.#replaceTrackedText(this.refusalParts, 'refusalText', 'contentBytes', payload, 'refusal', payload.refusal);
       return;
     }
     if (type === 'response.output_item.added') {
@@ -267,31 +378,38 @@ class ResponsesStreamParser {
       this.functionCalls.set(id, call);
       return;
     }
+    if (type === 'response.function_call_arguments.done') {
+      const id = payload.item_id || payload.call_id || String(payload.output_index ?? 0);
+      const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0);
+      if (typeof payload.name === 'string') {
+        this.toolNameBytes += Math.max(0, Buffer.byteLength(payload.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
+        if (payload.name !== call.name) call.nameFragmentCount += 1;
+        call.name = payload.name;
+        call.nameBytes = Buffer.byteLength(payload.name, 'utf8');
+      }
+      if (typeof payload.arguments === 'string') this.#replaceArguments(call, payload.arguments);
+      this.functionCalls.set(id, call);
+      return;
+    }
     if (type === 'response.output_item.done') {
       const item = payload.item || {};
-      if (item.type === 'function_call') {
-        const id = item.id || item.call_id || String(payload.output_index ?? 0);
-        const call = this.functionCalls.get(id) || createFunctionCall(id, payload.output_index ?? 0);
-        if (typeof item.name === 'string') {
-          this.toolNameBytes += Math.max(0, Buffer.byteLength(item.name, 'utf8') - Buffer.byteLength(call.name || '', 'utf8'));
-          if (item.name !== call.name) call.nameFragmentCount += 1;
-          call.name = item.name;
-          call.nameBytes = Buffer.byteLength(item.name, 'utf8');
-        }
-        if (typeof item.arguments === 'string') this.#replaceArguments(call, item.arguments);
-        this.functionCalls.set(id, call);
-      }
+      this.#ingestOutputItem(item, payload.output_index ?? 0);
     }
   }
 
   snapshot() {
     return {
+      terminal: this.terminal,
+      terminalEvent: this.terminalEvent,
       completed: this.completed,
+      incomplete: this.incomplete,
+      cancelled: this.cancelled,
       failed: this.failed,
       error: this.error,
       structuralErrors: [...this.structuralErrors],
       reasoning: this.reasoning,
       outputText: this.outputText,
+      refusalText: this.refusalText,
       functionCalls: this.functionCalls,
       eventCount: this.eventCount,
       response: this.response,
@@ -303,7 +421,13 @@ class ResponsesStreamParser {
         semanticBytes: this.reasoningBytes + this.contentBytes + this.toolNameBytes + this.toolArgumentBytes,
         ...collectFunctionCallDiagnostics(this.functionCalls),
         ...collectCompletionDiagnostics({
-          completed: this.completed, failed: this.failed, response: this.response,
+          terminal: this.terminal,
+          terminalEvent: this.terminalEvent,
+          completed: this.completed,
+          incomplete: this.incomplete,
+          cancelled: this.cancelled,
+          failed: this.failed,
+          response: this.response,
         }),
       },
     };
@@ -326,11 +450,15 @@ function parseReasoningItem(item) {
 function normalizeNonStream(payload) {
   let reasoning = '';
   let outputText = '';
+  let refusalText = '';
   const functionCalls = new Map();
   for (const [index, item] of (payload?.output || []).entries()) {
     if (item?.type === 'reasoning') reasoning += parseReasoningItem(item);
     if (item?.type === 'message') {
-      for (const content of item.content || []) if (content?.type === 'output_text' && typeof content.text === 'string') outputText += content.text;
+      for (const content of item.content || []) {
+        if (content?.type === 'output_text' && typeof content.text === 'string') outputText += content.text;
+        if (content?.type === 'refusal' && typeof content.refusal === 'string') refusalText += content.refusal;
+      }
     }
     if (item?.type === 'function_call') {
       const id = item.id || item.call_id || String(index);
@@ -345,11 +473,25 @@ function normalizeNonStream(payload) {
     }
   }
   finalizeCalls(functionCalls);
-  return { payload, completed: payload?.status === 'completed', failed: payload?.status === 'failed', error: payload?.error || null, reasoning, outputText, functionCalls };
+  const status = payload?.status ?? null;
+  return {
+    payload,
+    terminal: ['completed', 'incomplete', 'failed', 'cancelled'].includes(status),
+    terminalEvent: null,
+    completed: status === 'completed',
+    incomplete: status === 'incomplete',
+    cancelled: status === 'cancelled',
+    failed: status === 'failed',
+    error: payload?.error || null,
+    reasoning,
+    outputText,
+    refusalText,
+    functionCalls,
+  };
 }
 
-function validateResult(result, config, requireCompleted) {
-  if (requireCompleted && !result.completed) return invalid('missing_response_completed');
+function validateResult(result, config, requireTerminal) {
+  if (requireTerminal && !result.terminal) return invalid('missing_response_terminal');
   if (result.failed || result.error) return invalid('upstream_response_error', result.error?.message || 'upstream error');
   if (result.structuralErrors?.length) return invalid(result.structuralErrors[0]);
   if (Buffer.byteLength(result.reasoning || '', 'utf8') > config.maxReasoningBytes) return invalid('reasoning_buffer_limit');
@@ -361,7 +503,8 @@ function validateResult(result, config, requireCompleted) {
     if (call.argumentError) return invalid('malformed_tool_arguments', call.argumentError, { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
     if (!call.parsedArguments || typeof call.parsedArguments !== 'object' || Array.isArray(call.parsedArguments)) return invalid('invalid_tool_arguments', 'invalid_tool_arguments', { retryable: false, diagnostics: malformedCallDiagnostics(result.functionCalls, call) });
   }
-  if (!result.outputText?.trim() && result.functionCalls.size === 0) return invalid('reasoning_without_output');
+  if (result.incomplete || result.cancelled) return { ok: true };
+  if (!result.outputText?.trim() && !result.refusalText?.trim() && result.functionCalls.size === 0) return invalid('reasoning_without_output');
   return { ok: true };
 }
 
@@ -374,7 +517,7 @@ export const responsesAdapter = Object.freeze({
   semanticMetrics(result) {
     if (result.semanticMetrics) return { ...result.semanticMetrics, sseEvents: result.eventCount || 0 };
     const reasoningBytes = Buffer.byteLength(result.reasoning || '', 'utf8');
-    const contentBytes = Buffer.byteLength(result.outputText || '', 'utf8');
+    const contentBytes = Buffer.byteLength(result.outputText || '', 'utf8') + Buffer.byteLength(result.refusalText || '', 'utf8');
     let toolNameBytes = 0;
     let toolArgumentBytes = 0;
     for (const call of result.functionCalls.values()) {
@@ -407,7 +550,7 @@ export const responsesAdapter = Object.freeze({
   parseJson(buffer) { return normalizeNonStream(JSON.parse(buffer.toString('utf8'))); },
   getJsonReasoning(result) { return result.reasoning ? [result.reasoning] : []; },
   validateJson(result, config) { return withCompletionDiagnostics(result, validateResult(result, config, true)); },
-  extractOutput(result) { return { toolCalls: [...result.functionCalls.values()], finalText: result.outputText || '' }; },
+  extractOutput(result) { return { toolCalls: [...result.functionCalls.values()], finalText: result.outputText || result.refusalText || '' }; },
   streamError(error) { return `event: error\ndata: ${JSON.stringify({ type: 'error', error })}\n\n`; },
   jsonError(error) { return { error }; },
 });

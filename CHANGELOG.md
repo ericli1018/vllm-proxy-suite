@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.5 - 2026-07-28
+
+- Fixed `/v1/responses` incorrectly converting valid reasoning-only `status:"incomplete"` results into the custom `reasoning_without_output` error and Recovery.
+- Added transparent HTTP 200 replay for streamed `response.incomplete`, non-stream incomplete responses, and the vLLM variant that emits `response.completed` with `response.status="incomplete"`.
+- Added normalized terminal diagnostics: `responseTerminal`, `responseTerminalEvent`, `responseIncomplete`, `responseCancelled`, `responseIncompleteReason`, incomplete details, and usage tokens.
+- Added official Responses done-event support for reasoning text/summary, output text, refusal, function-call arguments, and `response.output_item.done`, with authoritative replacement instead of delta duplication.
+- Added terminal-response `output[]` ingestion so completed-only streams without preceding delta events still expose reasoning, text, refusal, or function calls.
+- Kept `response.failed` and explicit upstream errors fail-closed while allowing incomplete/cancelled terminal responses to pass protocol validation.
+- Added streamed and non-stream Gateway regressions proving incomplete reasoning-only responses are replayed byte-for-byte without Proxy Recovery.
+
 ## 0.5.4 - 2026-07-24
 
 - Fixed OpenAI Chat Recovery placing a new `role:"system"` message at the end of `messages[]`, which violated Ornith/vLLM chat-template ordering and caused `System message must be at the beginning` HTTP 400 failures.

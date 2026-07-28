@@ -146,7 +146,7 @@ request_completed
 Progress and terminal records normalize protocol completion:
 
 - Chat Completions: `finishReason`, `finishReasonsByChoice`, `doneReceived`.
-- Responses: `responseCompleted`, `responseFailed`, `responseStatus`.
+- Responses: `responseTerminal`, `responseTerminalEvent`, `responseCompleted`, `responseIncomplete`, `responseCancelled`, `responseFailed`, `responseStatus`, `responseIncompleteReason`, `responseIncompleteDetails`.
 - Anthropic Messages: `messageStopped`, `stopReason`.
 - All protocols: `usagePromptTokens`, `usageCompletionTokens`, `usageTotalTokens` when supplied upstream.
 
@@ -164,6 +164,18 @@ doneReceived=false
 ```
 
 For OpenAI Tool passthrough these are diagnostics only; they do not revoke delivered bytes.
+
+Responses terminal interpretation:
+
+```text
+responseTerminal=true
+responseIncomplete=true
+responseStatus="incomplete"
+responseIncompleteReason="max_output_tokens"
+→ valid terminal response; replay unchanged, no reasoning_without_output Recovery
+```
+
+The upstream may emit the official `response.incomplete` event or a `response.completed` event whose embedded response object has `status="incomplete"`. The response object status is authoritative. `response.failed` and explicit error events remain failures. Terminal `response.output[]` and done events are authoritative and may supply complete reasoning, output text, refusal, or function-call arguments even when no delta event preceded them.
 
 ## Bounded Tool observation
 

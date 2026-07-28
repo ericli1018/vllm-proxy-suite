@@ -30,6 +30,7 @@ const required = [
   'packages/openai/tool-classifier.js',
   'packages/server/create-proxy-server.js',
   'test/tool-passthrough-v053.test.js',
+  'test/responses-support-v055.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -54,7 +55,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.5.4') errors.push('package.json version must be 0.5.4');
+if (packageJson.version !== '0.5.5') errors.push('package.json version must be 0.5.5');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');

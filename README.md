@@ -21,6 +21,7 @@ OpenAI SDK / OpenAI-compatible Client
 - OpenAI Chat Completions／Responses 在第一個 Tool Call 前保持 Protected Streaming；第一個 Tool delta 出現後立即切換成透明直送。
 - OpenAI Tool commit 後不阻擋、不修補、不拆分、不重寫 Tool arguments，也不再執行 Recovery；Proxy 只保留有界觀測與計數。
 - OpenAI 沒有 Tool Call 的回應仍保留上游原始 response bytes，通過驗證後回放。
+- OpenAI Responses 將 `completed`、`incomplete` 與 `failed` 視為協議終止狀態；`incomplete`（包含只有 reasoning 的 `max_output_tokens` 結果）以原始 HTTP 200／SSE bytes 回放，不改寫成 Proxy 錯誤。
 - OpenAI Recovery 只在 Tool commit 前使用當次 request 真正提供的網路查詢或下載工具，不預設固定工具名稱。
 - OpenAI Chat 的 System Message 契約固定為最多一個且只能位於 `messages[0]`；Proxy 產生 Recovery 時會合併至該開頭訊息，Client 提供中途 System Message 則在進入 vLLM 前回傳明確 `400`。
 - Claude Code Tool Recovery 只載入 Anthropic runtime，不會影響 OpenAI API。
@@ -189,6 +190,28 @@ export OPENAI_API_KEY="$VLLM_OPENAI_PROXY_API_KEY"
 curl http://127.0.0.1:3456/v1/models \
   -H "Authorization: Bearer $VLLM_OPENAI_PROXY_API_KEY"
 ```
+
+### Responses API 終止狀態
+
+`POST /v1/responses` 支援 stream 與 non-stream。Proxy 接受並保留以下合法終止狀態：
+
+```text
+response.completed
+response.incomplete
+response.failed
+```
+
+vLLM 也可能以 `response.completed` 事件攜帶 `response.status="incomplete"`。Proxy 以 response object 的實際 status 為準，因此下列情況會原樣回傳 HTTP 200，不會產生 `reasoning_without_output`：
+
+```text
+status="incomplete"
+incomplete_details.reason="max_output_tokens"
+只有 reasoning，尚未產生 output_text 或 Tool Call
+```
+
+Client 應依 `status` 與 `incomplete_details` 決定是否提高 `max_output_tokens`、縮短任務或續接處理。`status="failed"` 與明確 upstream error 仍由 Proxy 視為失敗。
+
+Proxy 解析並觀測官方 Responses done/final events，包括 reasoning、summary、output text、refusal 與 function-call arguments；即使沒有先行 delta，terminal response 的完整 `output[]` 仍可作為權威結果。
 
 ## Loop Guard 與 OpenAI Tool Passthrough
 

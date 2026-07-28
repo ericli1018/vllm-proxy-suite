@@ -437,3 +437,40 @@ Prometheus counters:
 
 These diagnostics contain tool names and counts only; Tool schemas and generated text are not logged.
 
+
+
+## Responses Hosted Tool and malformed-tool diagnostics
+
+When `chat_adapter` drops optional Hosted Tools:
+
+```text
+event=responses_hosted_tools_filtered
+hostedToolPolicy="drop_optional"
+droppedToolTypes=["web_search"]
+droppedToolCount=1
+remainingToolCount=<client tools>
+requestContinued=true
+```
+
+Required Hosted Tools are rejected before upstream execution with `required_hosted_tool_unavailable` and include `requiredToolType`／`required_tool_type` in structured diagnostics.
+
+Malformed required-tool retry lifecycle:
+
+```text
+malformed_tool_arguments_retry_completed
+→ one constrained Chat sub-attempt succeeded
+
+malformed_tool_arguments_retry_fused
+→ the one permitted sub-attempt also failed
+→ final code malformed_required_tool_arguments
+→ retryable=false
+```
+
+Prometheus counters:
+
+```text
+vllm_openai_proxy_hosted_tools_filtered_total
+vllm_openai_proxy_required_hosted_tools_rejected_total
+vllm_openai_proxy_malformed_tool_retries_total
+vllm_openai_proxy_malformed_tool_retry_failures_total
+```

@@ -62,7 +62,7 @@ test('Responses request converts instructions, history, tools, and limits to Cha
 });
 
 test('Responses request rejects hosted tools and stateful response continuation', () => {
-  assert.throws(() => convertResponsesRequestToChat({ model: 'm', input: 'x', tools: [{ type: 'web_search_preview' }] }), /unsupported_responses_tool/);
+  assert.throws(() => convertResponsesRequestToChat({ model: 'm', input: 'x', tools: [{ type: 'web_search_preview' }] }, { hostedToolPolicy: 'reject' }), /unsupported_responses_tool/);
   assert.throws(() => convertResponsesRequestToChat({ model: 'm', input: 'x', previous_response_id: 'resp_1' }), /unsupported_previous_response_id/);
 });
 
@@ -311,7 +311,7 @@ test('Gateway chat_adapter commits a custom tool without actionless recovery', a
     ].join(''));
   });
   const upstreamUrl = await listen(upstream);
-  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl }));
+  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl, RESPONSES_HOSTED_TOOL_POLICY: 'reject' }));
   const runtime = createOpenAiProxyRuntime({ config, exposeControlRoutes: false });
   const proxy = http.createServer(runtime.handle);
   const proxyUrl = await listen(proxy);
@@ -363,7 +363,7 @@ test('Gateway chat_adapter rejects unsupported Responses features before contact
     res.writeHead(500).end();
   });
   const upstreamUrl = await listen(upstream);
-  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl }));
+  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl, RESPONSES_HOSTED_TOOL_POLICY: 'reject' }));
   const runtime = createOpenAiProxyRuntime({ config, exposeControlRoutes: false });
   const proxy = http.createServer(runtime.handle);
   const proxyUrl = await listen(proxy);

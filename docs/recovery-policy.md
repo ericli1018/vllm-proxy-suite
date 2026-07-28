@@ -128,3 +128,32 @@ Recovery bodies remain expressed in Responses form. In `chat_adapter` mode each 
 - Function, Custom, Namespace and `additional_tools` definitions remain available during Recovery.
 - Once the reconstructed Responses stream announces a Tool item, the common transparent Tool commit boundary disables further Recovery.
 - Adapter request-validation errors are non-generation HTTP 400 failures and are never sent as retryable upstream transport errors.
+
+
+## Hosted Tool filtering and malformed required-tool retry
+
+In `chat_adapter` mode, Hosted Tool policy is evaluated before the request reaches vLLM:
+
+```text
+drop_optional + auto
+→ remove unsupported Hosted Tools
+→ preserve Client function/custom/namespace tools
+→ continue
+
+required or explicit Hosted Tool with no supported Client alternative
+→ required_hosted_tool_unavailable
+→ retryable=false
+```
+
+`allowed_tools` is filtered as a closed allowlist; filtering never widens the set of permitted tools.
+
+A required Chat tool generation may be rejected by the vLLM Tool parser before any SSE bytes are returned. When the HTTP 400 body identifies malformed or unterminated Tool arguments, the adapter performs one internal sub-attempt with lower temperature, a minimum output-token budget, non-parallel execution, a small complete-JSON instruction, and explicit Function choice when only one tool exists.
+
+This internal sub-attempt does not consume another generic Proxy Recovery slot. It is strictly fused after one retry. A second parser rejection is classified as:
+
+```text
+malformed_required_tool_arguments
+retryable=false
+```
+
+The retry applies only when Tool choice is required or explicitly selects a Function. Optional `auto` generations are not silently retried as forced actions.

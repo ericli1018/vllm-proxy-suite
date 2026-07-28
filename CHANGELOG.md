@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.9 - 2026-07-28
+
+- Added `RESPONSES_HOSTED_TOOL_POLICY` with `drop_optional` as the default for `chat_adapter`. Optional `web_search`, `web_search_preview`, file-search, Code Interpreter, Computer Use, and Image Generation declarations are removed while Client-executed function/custom/namespace tools continue upstream.
+- Added strict required-hosted-tool handling. Explicit hosted-tool choices and required requests with no supported Client tool return typed `required_hosted_tool_unavailable`; `reject` and `native_only` policies remain available.
+- Added `allowed_tools` normalization so optional hosted entries are filtered from both the allowlist and effective Chat tool set without widening the permitted tools.
+- Added hosted-tool diagnostics and Prometheus counters for filtered declarations and rejected required hosted tools.
+- Added one bounded malformed required-tool retry inside the Responses-to-Chat adapter for vLLM 400 JSON/tool-parser errors. The retry lowers temperature, guarantees a minimum Tool output budget, disables parallel calls, requests a small complete JSON object, and explicitly selects the tool when only one remains.
+- Added a strict malformed-tool fuse. A second parser rejection returns typed `malformed_required_tool_arguments` with `retryable:false` instead of a nested generic `upstream_http_error`.
+- Preserved native Responses mode, transparent post-Tool passthrough, Think Loop handling, Actionless Completion Recovery, OpenAI Chat behavior, and Anthropic/Claude Code recovery.
+
 ## 0.5.8 - 2026-07-28
 
 - Added selectable Responses upstream modes: `chat_adapter` (default) and `native`. Codex continues to call `/v1/responses`; adapter mode calls vLLM `/v1/chat/completions` internally and reconstructs Responses JSON/SSE.

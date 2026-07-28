@@ -15,11 +15,12 @@
 13. Runtime Git synchronization force-resets the named volume to the configured ref on container start. Pin `VLLM_PROXY_SUITE_REF` or build the Dockerfile for immutable deployment.
 14. A valid Responses `status="incomplete"` is delivered unchanged. The Proxy does not automatically continue the response, increase `max_output_tokens`, or synthesize visible output from reasoning; the Client owns continuation policy.
 15. `chat_adapter` does not implement server-side Responses state. `previous_response_id`, background mode and `store=true` are rejected before upstream execution.
-16. `chat_adapter` supports Client-executed function/custom/namespace tools, including Responses Lite `additional_tools`; hosted web/file search, Code Interpreter, Computer Use, Image Generation and specialized hosted MCP lifecycle items are not emulated.
+16. `chat_adapter` supports Client-executed function/custom/namespace tools, including Responses Lite `additional_tools`; Hosted Tools are not emulated. Optional Hosted Tool declarations may be filtered by policy, while explicitly required Hosted Tools are rejected unless native mode is used.
 17. Specialized Responses history items such as compaction, shell/local-shell call records, hosted search records and unknown content blocks are rejected rather than silently discarded. Use `native` when the selected vLLM/model stack supports those items.
 18. Namespace tools are flattened into Chat function names and restored from a request-local mapping. A model that invents or mutates a flattened name cannot be routed reliably.
 19. Custom Tool freeform input is wrapped in a Chat JSON argument named `__arg1`. The Responses Tool boundary is announced immediately, but full freeform input remains available only when the Chat arguments are complete.
-20. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
+20. The malformed required-tool retry is heuristic and limited to one extra Chat upstream call. It can reduce parser failures but cannot guarantee that the model chooses the correct tool or produces semantically correct arguments.
+21. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
 
 ## Think Loop heuristic
 

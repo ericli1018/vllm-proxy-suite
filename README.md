@@ -19,7 +19,7 @@ OpenAI SDK / OpenAI-compatible Client
 - 共用 Loop Detector、Timeout、Cancellation 與最多一次 Recovery 控制。
 - Anthropic Messages 保持完整 Attempt 緩衝、驗證、Recovery 與原始 bytes 回放。
 - OpenAI Chat Completions／Responses 在第一個 Tool Call 前保持 Protected Streaming；第一個 Tool delta 出現後立即切換成透明直送。
-- `/v1/responses` 預設使用 `chat_adapter`：對外維持 Codex Responses protocol，內部轉成 vLLM `/v1/chat/completions`，再重建 Responses JSON／SSE；可切回 `native` 直接呼叫 vLLM Responses。
+- `/v1/responses` 預設使用 `chat_adapter`：對外維持 Codex Responses protocol，內部轉成 vLLM `/v1/chat/completions`，再重建 Responses JSON／SSE；可選 Hosted Tool 會依 policy 安全降級，可切回 `native` 直接呼叫 vLLM Responses。
 - OpenAI Tool commit 後不阻擋、不修補、不拆分、不重寫 Tool arguments，也不再執行 Recovery；Proxy 只保留有界觀測與計數。
 - OpenAI 沒有 Tool Call 的回應仍保留上游原始 response bytes，通過驗證後回放。
 - OpenAI Responses 將 `completed`、`incomplete` 與 `failed` 視為協議終止狀態；terminal event、可見 output、refusal 或 Function Call 具有高於 Think Loop 的優先權，合法結果會原樣回放。`incomplete`（包含只有 reasoning 的 `max_output_tokens` 結果）以原始 HTTP 200／SSE bytes 回放，不改寫成 Proxy 錯誤。
@@ -243,11 +243,70 @@ VLLM_PROXY_RESPONSES_UPSTREAM_MODE=chat_adapter
 - `previous_response_id`。
 - `background=true`。
 - `store=true`。
-- OpenAI hosted web/file search、Code Interpreter、Computer Use、Image Generation 等非 Client function/custom/namespace tools。
+- 明確要求且無法由 Client 執行的 hosted web/file search、Code Interpreter、Computer Use、Image Generation 等工具。可選 Hosted Tool 預設會被過濾，不會拒絕整個 Codex request。
 - 尚未映射的 specialized input item，例如 compaction、shell/local-shell、hosted MCP lifecycle item。
 - 未支援的 content block。
 
 需要上述原生 Responses 功能時，改用 `native`；不要在已開始生成後自動 fallback，以避免重複 Tool action。
+
+### Hosted Tool Policy
+
+Codex 可能在一般 Responses request 中自動附帶 `web_search`。`chat_adapter` 無法替 OpenAI 執行 Hosted Tool，因此預設使用：
+
+```env
+VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY=drop_optional
+```
+
+Policy：
+
+| 值 | 行為 |
+|---|---|
+| `drop_optional` | `auto`／未指定時過濾不支援的 Hosted Tools，保留 function/custom/namespace tools 並繼續請求 |
+| `reject` | 只要看到不支援 Hosted Tool 就回 HTTP 400 |
+| `native_only` | 回 `hosted_tool_requires_native_mode`，要求改用 native Responses |
+
+`tool_choice="required"` 在仍有 Client Tool 時會過濾 Hosted Tools後繼續；若只剩 Hosted Tool，或 `tool_choice` 明確指定 `web_search`，Proxy 回：
+
+```text
+required_hosted_tool_unavailable
+retryable=false
+```
+
+`allowed_tools` 也會同步過濾。`mode="auto"` 且過濾後為空時，Proxy 移除空的 `tools`／`tool_choice`，避免 vLLM Chat API 因空工具控制欄位拒絕請求；`mode="required"` 且沒有可執行 Client Tool 時則明確拒絕。
+
+Proxy 不會把 Hosted `web_search` 偽裝成一般 Function Tool，因為 Codex Client 沒有對應的 Hosted Tool executor。
+
+### Malformed required-tool retry
+
+Actionless Completion Recovery 或原始 `tool_choice="required"` 可能讓模型進入工具路徑，但 vLLM Tool parser 仍可能回：
+
+```text
+BadRequestError: Unterminated string ...
+```
+
+`chat_adapter` 預設只做一次受限重試：
+
+```env
+VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RETRY_ENABLED=true
+VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS=1024
+VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX=0.1
+```
+
+重試會：
+
+- 保持 `tool_choice="required"`；只有一個工具時改為明確指定該 Function。
+- 設定 `parallel_tool_calls=false`。
+- 要求完整且符合 schema 的小型 JSON arguments，不先塞入完整報告、大檔案或大型 patch。
+- 將 Tool output budget 至少提高到設定值，並降低 temperature。
+
+第二次仍被 vLLM parser 拒絕時立即熔斷：
+
+```text
+malformed_required_tool_arguments
+retryable=false
+```
+
+不會再進行第三次 Tool retry，也不會回傳巢狀的 generic `upstream_http_error`。
 
 ### Responses API 終止狀態
 

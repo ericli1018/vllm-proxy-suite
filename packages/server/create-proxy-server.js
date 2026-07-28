@@ -44,6 +44,10 @@ function createMetrics() {
     toolPassthroughValidationWarningsTotal: 0,
     actionlessCompletionsDetectedTotal: 0,
     actionlessRecoveriesFusedTotal: 0,
+    hostedToolsFilteredTotal: 0,
+    requiredHostedToolsRejectedTotal: 0,
+    malformedToolRetriesTotal: 0,
+    malformedToolRetryFailuresTotal: 0,
   };
 }
 
@@ -412,6 +416,7 @@ export function createProtocolProxyRuntime({
         firstBody = route.prepareRequest(originalBody, { recovery: false, config });
       } catch (error) {
         const type = error?.code || 'invalid_request';
+        if (type === 'required_hosted_tool_unavailable') metrics.requiredHostedToolsRejectedTotal += 1;
         terminal('request_rejected', { status: 400, reason: type, ...(error?.details || {}) }, 'warn');
         return jsonResponse(response, 400, formatJsonError(
           type,
@@ -420,9 +425,18 @@ export function createProtocolProxyRuntime({
           error?.details || {},
         ));
       }
-      if (route.requestDiagnostics) {
-        requestLogger.debug('request_tool_context', route.requestDiagnostics(firstBody, { originalBody, config }) || {});
-      }
+      const preparedDiagnostics = route.requestDiagnostics
+        ? (route.requestDiagnostics(firstBody, { originalBody, config }) || {})
+        : {};
+      if (route.requestDiagnostics) requestLogger.debug('request_tool_context', preparedDiagnostics);
+      route.onPreparedRequest?.({
+        body: firstBody,
+        originalBody,
+        diagnostics: preparedDiagnostics,
+        metrics,
+        logger: requestLogger,
+        config,
+      });
       const recordActionlessCompletion = (validation, attemptNumber, recovery) => {
         if (validation?.reason !== 'actionless_completion') return;
         metrics.actionlessCompletionsDetectedTotal += 1;
@@ -543,6 +557,25 @@ export function createProtocolProxyRuntime({
         clientSignal: clientController.signal,
       };
 
+      const finalizeRouteAttempt = (attempt, attemptNumber, phase) => {
+        const classified = route.classifyAttempt?.(attempt, {
+          attemptNumber,
+          phase,
+          metrics,
+          logger: requestLogger,
+          config,
+        }) || attempt;
+        route.observeAttempt?.({
+          attempt: classified,
+          attemptNumber,
+          phase,
+          metrics,
+          logger: requestLogger,
+          config,
+        });
+        return classified;
+      };
+
       let attempt = await performBufferedAttempt({
         ...attemptArgs,
         requestBody: JSON.stringify(firstBody),
@@ -551,6 +584,7 @@ export function createProtocolProxyRuntime({
         attemptNumber: 1,
         toolPassthrough: createToolPassthrough(1, 'initial'),
       });
+      attempt = finalizeRouteAttempt(attempt, 1, 'initial');
       if (attempt.kind === 'success' && route.validateAttempt) {
         const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody, config });
         if (!semanticValidation.ok) {
@@ -615,6 +649,7 @@ export function createProtocolProxyRuntime({
           attemptNumber: 2,
           toolPassthrough: createToolPassthrough(2, 'recovery'),
         });
+        attempt = finalizeRouteAttempt(attempt, 2, 'recovery');
         if (attempt.kind === 'success' && route.validateAttempt) {
           const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody: recovery.body, config, recovery: true });
           if (!semanticValidation.ok) {

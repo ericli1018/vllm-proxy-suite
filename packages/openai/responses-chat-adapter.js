@@ -11,6 +11,132 @@ export class ResponsesChatAdapterError extends Error {
 }
 
 
+const HOSTED_TOOL_TYPES = new Set([
+  'web_search',
+  'web_search_preview',
+  'file_search',
+  'code_interpreter',
+  'computer_use',
+  'computer',
+  'image_generation',
+]);
+const HOSTED_TOOL_DIAGNOSTICS = Symbol('responsesHostedToolDiagnostics');
+
+function hostedToolType(tool) {
+  const type = typeof tool?.type === 'string' ? tool.type : '';
+  return HOSTED_TOOL_TYPES.has(type) ? type : null;
+}
+
+function toolSelectionKey(tool) {
+  if (!tool || typeof tool !== 'object') return null;
+  const type = tool.type || 'function';
+  if (type === 'function') {
+    const name = tool.name || tool.function?.name;
+    return name ? `function:${name}` : null;
+  }
+  if (type === 'custom') return tool.name ? `custom:${tool.name}` : null;
+  if (type === 'namespace') return tool.name ? `namespace:${tool.name}` : null;
+  return hostedToolType(tool) ? `hosted:${type}` : null;
+}
+
+function hostedToolError(code, type, policy) {
+  const messages = {
+    required_hosted_tool_unavailable: `required_hosted_tool_unavailable:${type}`,
+    hosted_tool_requires_native_mode: `hosted_tool_requires_native_mode:${type}`,
+    unsupported_responses_tool: `unsupported_responses_tool:${type}`,
+  };
+  return new ResponsesChatAdapterError(code, messages[code] || code, {
+    requiredToolType: type,
+    required_tool_type: type,
+    hostedToolPolicy: policy,
+    hosted_tool_policy: policy,
+  });
+}
+
+function attachHostedDiagnostics(body, diagnostics) {
+  Object.defineProperty(body, HOSTED_TOOL_DIAGNOSTICS, {
+    value: Object.freeze({
+      hostedToolPolicy: diagnostics.hostedToolPolicy,
+      droppedToolTypes: Object.freeze([...diagnostics.droppedToolTypes]),
+      droppedToolCount: diagnostics.droppedToolCount,
+      remainingToolCount: diagnostics.remainingToolCount,
+      requestContinued: diagnostics.requestContinued,
+    }),
+    enumerable: false,
+    configurable: true,
+  });
+  return body;
+}
+
+export function responsesHostedToolDiagnostics(body) {
+  return body?.[HOSTED_TOOL_DIAGNOSTICS] || {
+    hostedToolPolicy: null,
+    droppedToolTypes: [],
+    droppedToolCount: 0,
+    remainingToolCount: Array.isArray(body?.tools) ? body.tools.length : 0,
+    requestContinued: true,
+  };
+}
+
+export function prepareResponsesRequestForChatAdapter(body, options = {}) {
+  const policy = String(options.hostedToolPolicy || 'drop_optional').toLowerCase();
+  if (!['drop_optional', 'reject', 'native_only'].includes(policy)) {
+    throw new ResponsesChatAdapterError('invalid_hosted_tool_policy', `invalid_hosted_tool_policy:${policy}`);
+  }
+
+  const normalized = normalizeResponsesRequestForChatAdapter(body);
+  const tools = Array.isArray(normalized.tools) ? normalized.tools : [];
+  const hosted = tools.filter((tool) => hostedToolType(tool));
+  const hostedTypes = [...new Set(hosted.map((tool) => hostedToolType(tool)))];
+  if (hosted.length === 0) {
+    return attachHostedDiagnostics(normalized, {
+      hostedToolPolicy: policy,
+      droppedToolTypes: [],
+      droppedToolCount: 0,
+      remainingToolCount: tools.length,
+      requestContinued: true,
+    });
+  }
+
+  if (policy === 'reject') throw hostedToolError('unsupported_responses_tool', hostedTypes[0], policy);
+  if (policy === 'native_only') throw hostedToolError('hosted_tool_requires_native_mode', hostedTypes[0], policy);
+
+  const choice = normalized.tool_choice;
+  const explicitHostedType = choice && typeof choice === 'object' ? hostedToolType(choice) : null;
+  if (explicitHostedType) throw hostedToolError('required_hosted_tool_unavailable', explicitHostedType, policy);
+
+  let retainedTools = tools.filter((tool) => !hostedToolType(tool));
+  if (choice?.type === 'allowed_tools') {
+    const mode = choice.mode === 'required' ? 'required' : 'auto';
+    const allowed = Array.isArray(choice.tools) ? choice.tools : [];
+    const allowedHostedTypes = [...new Set(allowed.map((tool) => hostedToolType(tool)).filter(Boolean))];
+    const supportedKeys = new Set(allowed.map(toolSelectionKey).filter((key) => key && !key.startsWith('hosted:')));
+    retainedTools = retainedTools.filter((tool) => supportedKeys.has(toolSelectionKey(tool)));
+    if (mode === 'required' && retainedTools.length === 0) {
+      throw hostedToolError('required_hosted_tool_unavailable', allowedHostedTypes[0] || hostedTypes[0], policy);
+    }
+    if (retainedTools.length === 0) delete normalized.tool_choice;
+    else normalized.tool_choice = mode;
+  } else if (choice === 'required' && retainedTools.length === 0) {
+    throw hostedToolError('required_hosted_tool_unavailable', hostedTypes[0], policy);
+  }
+
+  if (retainedTools.length > 0) normalized.tools = retainedTools;
+  else {
+    delete normalized.tools;
+    if (normalized.tool_choice === 'auto' || normalized.tool_choice === 'none') delete normalized.tool_choice;
+  }
+  return attachHostedDiagnostics(normalized, {
+    hostedToolPolicy: policy,
+    droppedToolTypes: hostedTypes,
+    droppedToolCount: hosted.length,
+    remainingToolCount: retainedTools.length,
+    requestContinued: true,
+  });
+}
+
+
+
 export function normalizeResponsesRequestForChatAdapter(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new ResponsesChatAdapterError('invalid_responses_request');
@@ -223,8 +349,8 @@ function convertTextFormat(text) {
   throw new ResponsesChatAdapterError('unsupported_text_format');
 }
 
-export function convertResponsesRequestToChat(body) {
-  body = normalizeResponsesRequestForChatAdapter(body);
+export function convertResponsesRequestToChat(body, options = {}) {
+  body = prepareResponsesRequestForChatAdapter(body, options);
   if (body.previous_response_id) throw new ResponsesChatAdapterError('unsupported_previous_response_id');
   if (body.background) throw new ResponsesChatAdapterError('unsupported_background_mode');
   if (body.store === true) throw new ResponsesChatAdapterError('unsupported_response_storage');
@@ -241,7 +367,10 @@ export function convertResponsesRequestToChat(body) {
     stream: Boolean(body.stream),
   };
   if (result.stream) result.stream_options = { include_usage: true };
-  if (Array.isArray(body.tools)) result.tools = body.tools.flatMap(convertTool);
+  if (Array.isArray(body.tools)) {
+    const convertedTools = body.tools.flatMap(convertTool);
+    if (convertedTools.length > 0) result.tools = convertedTools;
+  }
   const toolChoice = convertToolChoice(body.tool_choice);
   if (toolChoice !== undefined) result.tool_choice = toolChoice;
   if (body.parallel_tool_calls !== undefined) result.parallel_tool_calls = Boolean(body.parallel_tool_calls);
@@ -575,11 +704,88 @@ function transformChatStream(response, context) {
   return new Response(stream, { status: response.status, statusText: response.statusText, headers: copyHeaders(response.headers, 'text/event-stream; charset=utf-8') });
 }
 
-export function createResponsesChatAdapterFetch(fetchImpl = globalThis.fetch) {
+
+function malformedToolErrorText(text) {
+  return /unterminated string|jsondecodeerror|json decode|expecting (?:property name|value|['"]?[,}:]['"]? delimiter)|invalid (?:tool|function) (?:call|arguments)|malformed (?:tool|function) (?:call|arguments)/i.test(String(text || ''));
+}
+
+function requiredToolChoice(choice) {
+  return choice === 'required' || (choice && typeof choice === 'object' && choice.type === 'function');
+}
+
+function appendChatSystemInstruction(messages, instruction) {
+  const output = Array.isArray(messages) ? structuredClone(messages) : [];
+  if (output[0]?.role === 'system') {
+    const content = output[0].content;
+    if (typeof content === 'string') output[0].content = content ? `${content}
+
+${instruction}` : instruction;
+    else if (Array.isArray(content)) output[0].content = [...content, { type: 'text', text: instruction }];
+    else output[0].content = instruction;
+    return output;
+  }
+  output.unshift({ role: 'system', content: instruction });
+  return output;
+}
+
+function malformedToolRecoveryChatBody(chatBody, options = {}) {
+  const retry = structuredClone(chatBody);
+  const minimumTokens = Number.isFinite(Number(options.malformedToolRecoveryMinTokens))
+    ? Math.max(1, Number(options.malformedToolRecoveryMinTokens))
+    : 1024;
+  const temperatureMax = Number.isFinite(Number(options.malformedToolRecoveryTemperatureMax))
+    ? Math.max(0, Number(options.malformedToolRecoveryTemperatureMax))
+    : 0.1;
+  const instruction = [
+    'The previous required tool call was rejected because its arguments were malformed or incomplete.',
+    'Return no prose.',
+    'Call exactly one tool with a complete JSON object that matches the selected tool schema.',
+    'Keep the first tool action small and use only the minimum arguments required to begin execution.',
+    'Do not place a full report, source file, or large patch inside the first tool call.',
+  ].join(' ');
+  retry.messages = appendChatSystemInstruction(retry.messages, instruction);
+  retry.parallel_tool_calls = false;
+  retry.temperature = Math.min(Number.isFinite(Number(retry.temperature)) ? Number(retry.temperature) : temperatureMax, temperatureMax);
+  retry.max_tokens = Math.max(Number.isFinite(Number(retry.max_tokens)) ? Number(retry.max_tokens) : 0, minimumTokens);
+  if (Array.isArray(retry.tools) && retry.tools.length === 1 && retry.tools[0]?.function?.name) {
+    retry.tool_choice = { type: 'function', function: { name: retry.tools[0].function.name } };
+  } else {
+    retry.tool_choice = 'required';
+  }
+  return retry;
+}
+
+function responseWithRetryHeaders(response, result) {
+  const headers = new Headers(response.headers);
+  headers.set('x-vllm-proxy-chat-adapter-retry', 'malformed_tool_arguments');
+  headers.set('x-vllm-proxy-chat-adapter-retry-result', result);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+async function maybeRetryMalformedRequiredTool(fetchImpl, targetUrl, init, chatBody, upstream, options = {}) {
+  if (options.malformedToolRetryEnabled === false || upstream.status !== 400 || !requiredToolChoice(chatBody.tool_choice)) return upstream;
+  const rawError = await upstream.text();
+  if (!malformedToolErrorText(rawError)) {
+    return new Response(rawError, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: upstream.headers,
+    });
+  }
+  const retryBody = malformedToolRecoveryChatBody(chatBody, options);
+  const retried = await fetchImpl(targetUrl, { ...init, body: JSON.stringify(retryBody) });
+  return responseWithRetryHeaders(retried, retried.ok ? 'success' : 'failed');
+}
+
+export function createResponsesChatAdapterFetch(fetchImpl = globalThis.fetch, options = {}) {
   return async function responsesChatAdapterFetch(url, init = {}) {
     const rawBody = typeof init.body === 'string' ? init.body : Buffer.from(init.body || '').toString('utf8');
-    const responsesBody = normalizeResponsesRequestForChatAdapter(JSON.parse(rawBody || '{}'));
-    const chatBody = convertResponsesRequestToChat(responsesBody);
+    const responsesBody = prepareResponsesRequestForChatAdapter(JSON.parse(rawBody || '{}'), options);
+    const chatBody = convertResponsesRequestToChat(responsesBody, options);
     const context = contextDefaults({
       model: responsesBody.model,
       toolKinds: toolKindsFromRequest(responsesBody),
@@ -589,7 +795,9 @@ export function createResponsesChatAdapterFetch(fetchImpl = globalThis.fetch) {
       toolChoice: responsesBody.tool_choice ?? 'auto',
       tools: responsesBody.tools || [],
     });
-    const upstream = await fetchImpl(chatTargetUrl(url), { ...init, body: JSON.stringify(chatBody) });
+    const targetUrl = chatTargetUrl(url);
+    let upstream = await fetchImpl(targetUrl, { ...init, body: JSON.stringify(chatBody) });
+    upstream = await maybeRetryMalformedRequiredTool(fetchImpl, targetUrl, init, chatBody, upstream, options);
     if (!upstream.ok) return upstream;
     if (chatBody.stream) return transformChatStream(upstream, context);
     const payload = await upstream.json();

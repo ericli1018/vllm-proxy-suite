@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-import { loadCommonConfig, parseCsv } from '../../packages/core/config.js';
+import { loadCommonConfig, parseBoolean, parseCsv } from '../../packages/core/config.js';
 import { chatCompletionsAdapter } from '../../packages/openai/chat-completions.js';
 import { responsesAdapter } from '../../packages/openai/responses.js';
 import {
   convertResponsesRequestToChat,
   createResponsesChatAdapterFetch,
-  normalizeResponsesRequestForChatAdapter,
+  prepareResponsesRequestForChatAdapter,
+  responsesHostedToolDiagnostics,
 } from '../../packages/openai/responses-chat-adapter.js';
 import {
   assertChatMessageOrdering,
@@ -28,6 +29,22 @@ export function loadOpenAiConfig(env = process.env) {
     responsesUpstreamMode: (() => {
       const value = String(env.RESPONSES_UPSTREAM_MODE ?? env.VLLM_PROXY_RESPONSES_UPSTREAM_MODE ?? 'chat_adapter').toLowerCase();
       return ['native', 'chat_adapter'].includes(value) ? value : 'chat_adapter';
+    })(),
+    responsesHostedToolPolicy: (() => {
+      const value = String(env.RESPONSES_HOSTED_TOOL_POLICY ?? env.VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY ?? 'drop_optional').toLowerCase();
+      return ['drop_optional', 'reject', 'native_only'].includes(value) ? value : 'drop_optional';
+    })(),
+    responsesMalformedToolRetryEnabled: parseBoolean(
+      env.RESPONSES_MALFORMED_TOOL_RETRY_ENABLED ?? env.VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RETRY_ENABLED,
+      true,
+    ),
+    responsesMalformedToolRecoveryMinTokens: (() => {
+      const value = Number.parseInt(String(env.RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS ?? env.VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS ?? '1024'), 10);
+      return Number.isSafeInteger(value) && value > 0 ? value : 1024;
+    })(),
+    responsesMalformedToolRecoveryTemperatureMax: (() => {
+      const value = Number(env.RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX ?? env.VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX ?? 0.1);
+      return Number.isFinite(value) && value >= 0 && value <= 2 ? value : 0.1;
     })(),
     recoveryToolOptions: Object.freeze({
       lookupNames: parseCsv(env.RECOVERY_NETWORK_LOOKUP_TOOL_NAMES),
@@ -51,14 +68,69 @@ function createRoute(adapter, api, config, options = {}) {
     prepareRequest(body) {
       if (api === 'chat') assertChatMessageOrdering(body?.messages);
       if (api === 'responses' && config.responsesUpstreamMode === 'chat_adapter') {
-        const normalized = normalizeResponsesRequestForChatAdapter(body);
-        convertResponsesRequestToChat(normalized);
-        return normalized;
+        const prepared = prepareResponsesRequestForChatAdapter(body, {
+          hostedToolPolicy: config.responsesHostedToolPolicy,
+        });
+        convertResponsesRequestToChat(prepared, {
+          hostedToolPolicy: config.responsesHostedToolPolicy,
+        });
+        return prepared;
       }
       return structuredClone(body);
     },
     requestDiagnostics(body) {
-      return { ...summarizeOpenAiToolContext(body), ...(api === 'responses' ? { responsesUpstreamMode: config.responsesUpstreamMode } : {}) };
+      const hosted = api === 'responses' ? responsesHostedToolDiagnostics(body) : null;
+      return {
+        ...summarizeOpenAiToolContext(body),
+        ...(api === 'responses' ? {
+          responsesUpstreamMode: config.responsesUpstreamMode,
+          responsesHostedToolPolicy: config.responsesHostedToolPolicy,
+          ...(hosted || {}),
+        } : {}),
+      };
+    },
+    onPreparedRequest({ body, metrics, logger }) {
+      if (api !== 'responses') return;
+      const hosted = responsesHostedToolDiagnostics(body);
+      if (!hosted.droppedToolCount) return;
+      metrics.hostedToolsFilteredTotal += hosted.droppedToolCount;
+      logger.info('responses_hosted_tools_filtered', {
+        hostedToolPolicy: hosted.hostedToolPolicy,
+        droppedToolTypes: hosted.droppedToolTypes,
+        droppedToolCount: hosted.droppedToolCount,
+        remainingToolCount: hosted.remainingToolCount,
+        requestContinued: true,
+      });
+    },
+    observeAttempt({ attempt, metrics, logger, attemptNumber, phase }) {
+      if (api !== 'responses') return;
+      const retryType = attempt?.headers?.get?.('x-vllm-proxy-chat-adapter-retry');
+      if (retryType !== 'malformed_tool_arguments') return;
+      const result = attempt.headers.get('x-vllm-proxy-chat-adapter-retry-result') || 'unknown';
+      metrics.malformedToolRetriesTotal += 1;
+      if (result !== 'success') metrics.malformedToolRetryFailuresTotal += 1;
+      logger[result === 'success' ? 'info' : 'warn'](
+        result === 'success' ? 'malformed_tool_arguments_retry_completed' : 'malformed_tool_arguments_retry_fused',
+        { attempt: attemptNumber, phase, retryType, result },
+      );
+    },
+    classifyAttempt(attempt) {
+      if (api !== 'responses') return attempt;
+      const retryType = attempt?.headers?.get?.('x-vllm-proxy-chat-adapter-retry');
+      const result = attempt?.headers?.get?.('x-vllm-proxy-chat-adapter-retry-result');
+      if (retryType !== 'malformed_tool_arguments' || result !== 'failed') return attempt;
+      return {
+        ...attempt,
+        kind: 'http_error',
+        status: 400,
+        reason: 'malformed_required_tool_arguments',
+        retryable: false,
+        diagnostics: {
+          ...(attempt.diagnostics || {}),
+          malformedToolRetryAttempted: true,
+          malformedToolRetryResult: 'failed',
+        },
+      };
     },
     validateAttempt(attempt, { firstBody, recovery = false }) {
       if (api !== 'responses' || !config.actionlessCompletionGuardEnabled) return { ok: true };
@@ -115,7 +187,12 @@ function createRoute(adapter, api, config, options = {}) {
 
 function openAiRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true, logSink }) {
   const responsesFetchImpl = config.responsesUpstreamMode === 'chat_adapter'
-    ? createResponsesChatAdapterFetch(fetchImpl)
+    ? createResponsesChatAdapterFetch(fetchImpl, {
+      hostedToolPolicy: config.responsesHostedToolPolicy,
+      malformedToolRetryEnabled: config.responsesMalformedToolRetryEnabled,
+      malformedToolRecoveryMinTokens: config.responsesMalformedToolRecoveryMinTokens,
+      malformedToolRecoveryTemperatureMax: config.responsesMalformedToolRecoveryTemperatureMax,
+    })
     : null;
   return {
     name: 'vllm-openai-proxy',

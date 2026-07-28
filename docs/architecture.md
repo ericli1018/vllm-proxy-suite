@@ -118,22 +118,24 @@ It then runs `node /app/vllm-proxy-suite.js`. The included Dockerfile remains av
 `/v1/responses` 有兩個固定配置模式：
 
 ```text
-RESPONSES_UPSTREAM_MODE=chat_adapter
+RESPONSES_UPSTREAM_MODE=native（預設）
+Responses frontend
+→ optional request-side Tool Choice Policy
+→ native vLLM Responses upstream
+→ existing Responses parser/delivery
+
+RESPONSES_UPSTREAM_MODE=chat_adapter（明確 fallback）
 Responses frontend
 → normalize Responses Lite additional_tools
+→ optional request-side Tool Choice Policy
 → canonical message/tool mapping
 → Chat Completions upstream
 → Responses event encoder
-→ existing Responses parser/guards/delivery
-
-RESPONSES_UPSTREAM_MODE=native
-Responses frontend
-→ native vLLM Responses upstream
-→ existing Responses parser/guards/delivery
+→ existing Responses parser/delivery
 ```
 
-The route-scoped fetch adapter sits below the existing attempt runner. The attempt runner therefore continues to see standard Responses JSON/SSE in both modes, so Think Loop eligibility, Actionless Completion validation, transparent Tool commit, replay, cancellation, timeouts and metrics do not need a second implementation.
+The route-scoped fetch adapter sits below the existing attempt runner. The attempt runner therefore continues to see standard Responses JSON/SSE in both modes, so protocol parsing, transparent Tool commit, replay, cancellation, timeouts and metrics do not need a second implementation. Responses behavioral guards remain disabled by default through `RESPONSES_BEHAVIOR_MODE=transparent`.
 
 The adapter uses a request-local mapping table to flatten namespace tools for Chat upstreams and restore `(namespace, name)` in Responses function calls. Custom tools are represented upstream as strict wrapper functions with a single freeform `__arg1` string; the encoder restores native `custom_tool_call` items.
 
-There is no automatic native-to-chat fallback after an attempt starts. A deployment selects one mode per runtime to prevent duplicate inference or duplicate Tool side effects.
+There is no automatic native-to-chat fallback after an attempt starts. A deployment selects one mode per runtime to prevent duplicate inference or duplicate Tool side effects. The default is native because it preserves vLLM's Responses renderer, item lifecycle and model-specific tool context.

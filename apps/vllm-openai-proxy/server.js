@@ -17,6 +17,11 @@ import {
 } from '../../packages/openai/recovery.js';
 import { planNetworkRecovery } from '../../packages/openai/tool-classifier.js';
 import { detectActionlessCompletion, summarizeOpenAiToolContext } from '../../packages/openai/actionless-completion.js';
+import {
+  applyResponsesToolChoicePolicy,
+  normalizeResponsesToolChoicePolicy,
+  responsesToolChoiceDiagnostics,
+} from '../../packages/openai/responses-tool-choice-policy.js';
 import { createProtocolProxyRuntime } from '../../packages/server/create-proxy-server.js';
 
 export function loadOpenAiConfig(env = process.env) {
@@ -36,9 +41,12 @@ export function loadOpenAiConfig(env = process.env) {
     ...loadCommonConfig(protocolEnv, { port: 3456 }),
     responsesBehaviorMode,
     responsesUpstreamMode: (() => {
-      const value = String(env.RESPONSES_UPSTREAM_MODE ?? env.VLLM_PROXY_RESPONSES_UPSTREAM_MODE ?? 'chat_adapter').toLowerCase();
-      return ['native', 'chat_adapter'].includes(value) ? value : 'chat_adapter';
+      const value = String(env.RESPONSES_UPSTREAM_MODE ?? env.VLLM_PROXY_RESPONSES_UPSTREAM_MODE ?? 'native').toLowerCase();
+      return ['native', 'chat_adapter'].includes(value) ? value : 'native';
     })(),
+    responsesToolChoicePolicy: normalizeResponsesToolChoicePolicy(
+      env.RESPONSES_TOOL_CHOICE_POLICY ?? env.VLLM_PROXY_RESPONSES_TOOL_CHOICE_POLICY,
+    ),
     responsesHostedToolPolicy: (() => {
       const value = String(env.RESPONSES_HOSTED_TOOL_POLICY ?? env.VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY ?? 'drop_optional').toLowerCase();
       return ['drop_optional', 'reject', 'native_only'].includes(value) ? value : 'drop_optional';
@@ -75,31 +83,44 @@ function createRoute(adapter, api, config, options = {}) {
     transparentToolPassthrough: true,
     prepareRequest(body) {
       if (api === 'chat') assertChatMessageOrdering(body?.messages);
-      if (api === 'responses' && config.responsesUpstreamMode === 'chat_adapter') {
-        const prepared = prepareResponsesRequestForChatAdapter(body, {
-          hostedToolPolicy: config.responsesHostedToolPolicy,
-        });
-        convertResponsesRequestToChat(prepared, {
-          hostedToolPolicy: config.responsesHostedToolPolicy,
-        });
-        return prepared;
+      if (api !== 'responses') return structuredClone(body);
+
+      let prepared = config.responsesUpstreamMode === 'chat_adapter'
+        ? prepareResponsesRequestForChatAdapter(body, { hostedToolPolicy: config.responsesHostedToolPolicy })
+        : structuredClone(body);
+      if (config.responsesUpstreamMode === 'chat_adapter') {
+        convertResponsesRequestToChat(prepared, { hostedToolPolicy: config.responsesHostedToolPolicy });
       }
-      return structuredClone(body);
+      prepared = applyResponsesToolChoicePolicy(prepared, {
+        policy: config.responsesToolChoicePolicy,
+      }).body;
+      return prepared;
     },
     requestDiagnostics(body) {
-      const hosted = api === 'responses' ? responsesHostedToolDiagnostics(body) : null;
+      const hosted = api === 'responses' && config.responsesUpstreamMode === 'chat_adapter'
+        ? responsesHostedToolDiagnostics(body)
+        : null;
+      const toolChoice = api === 'responses' ? responsesToolChoiceDiagnostics(body) : null;
       return {
         ...summarizeOpenAiToolContext(body),
         ...(api === 'responses' ? {
           responsesUpstreamMode: config.responsesUpstreamMode,
           responsesBehaviorMode: config.responsesBehaviorMode,
+          responsesToolChoicePolicy: config.responsesToolChoicePolicy,
           responsesHostedToolPolicy: config.responsesHostedToolPolicy,
+          ...(toolChoice || {}),
           ...(hosted || {}),
         } : {}),
       };
     },
     onPreparedRequest({ body, metrics, logger }) {
       if (api !== 'responses') return;
+      const toolChoice = responsesToolChoiceDiagnostics(body);
+      if (toolChoice?.toolChoiceRewritten) {
+        metrics.toolChoiceRewritesTotal += 1;
+        logger.info('responses_tool_choice_rewritten', toolChoice);
+      }
+      if (config.responsesUpstreamMode !== 'chat_adapter') return;
       const hosted = responsesHostedToolDiagnostics(body);
       if (!hosted.droppedToolCount) return;
       metrics.hostedToolsFilteredTotal += hosted.droppedToolCount;

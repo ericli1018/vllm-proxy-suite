@@ -1,7 +1,7 @@
 # Known Limitations
 
-1. Anthropic Messages and OpenAI responses without Tool Calls use Protected Streaming rather than immediate model-token streaming.
-2. OpenAI Chat Completions and Responses become immediate transparent streams only after the first Tool Call is parsed. Pre-Tool reasoning remains buffered so Thinking Loops can still be discarded.
+1. Anthropic Messages and OpenAI responses without Tool Calls use buffered protocol delivery rather than immediate model-token streaming.
+2. OpenAI Chat Completions still uses the pre-Tool behavioral guard. Responses defaults to `transparent`, so pre-Tool reasoning is buffered for protocol observation but is not discarded by Think Loop or Actionless classification.
 3. The OpenAI Tool commit boundary is irreversible. Malformed, truncated, oversized, or semantically incorrect Tool arguments are not repaired or blocked by the Proxy after commit.
 4. Transparent Tool passthrough does not solve model completion-limit truncation. The client may still reject an incomplete Tool Call or retry the same request.
 5. If the upstream or client connection fails after Tool commit, the Proxy terminates the stream and cannot safely append a second structured error or Recovery response.
@@ -14,13 +14,14 @@
 12. Unknown SSE events are preserved by protected replay or transparent streaming but may not contribute to Loop Detection or semantic progress.
 13. Runtime Git synchronization force-resets the named volume to the configured ref on container start. Pin `VLLM_PROXY_SUITE_REF` or build the Dockerfile for immutable deployment.
 14. A valid Responses `status="incomplete"` is delivered unchanged. The Proxy does not automatically continue the response, increase `max_output_tokens`, or synthesize visible output from reasoning; the Client owns continuation policy.
-15. `chat_adapter` does not implement server-side Responses state. `previous_response_id`, background mode and `store=true` are rejected before upstream execution.
+15. `native` is the default and depends on the selected vLLM/model stack correctly implementing Responses rendering, Tool Calling and multi-turn item history. `chat_adapter` remains an explicit compatibility fallback and does not implement server-side Responses state. `previous_response_id`, background mode and `store=true` are rejected before upstream execution.
 16. `chat_adapter` supports Client-executed function/custom/namespace tools, including Responses Lite `additional_tools`; Hosted Tools are not emulated. Optional Hosted Tool declarations may be filtered by policy, while explicitly required Hosted Tools are rejected unless native mode is used.
 17. Specialized Responses history items such as compaction, shell/local-shell call records, hosted search records and unknown content blocks are rejected rather than silently discarded. Use `native` when the selected vLLM/model stack supports those items.
 18. Namespace tools are flattened into Chat function names and restored from a request-local mapping. A model that invents or mutates a flattened name cannot be routed reliably.
 19. Custom Tool freeform input is wrapped in a Chat JSON argument named `__arg1`. The Responses Tool boundary is announced immediately, but full freeform input remains available only when the Chat arguments are complete.
 20. The malformed required-tool retry is heuristic and limited to one extra Chat upstream call. It can reduce parser failures but cannot guarantee that the model chooses the correct tool or produces semantically correct arguments.
-21. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
+21. `required_on_explicit_continue` recognizes only short explicit execution commands. It intentionally does not classify general task prompts, and `tool_choice=required` still cannot guarantee semantically correct tool selection or arguments.
+22. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
 
 ## Think Loop heuristic
 

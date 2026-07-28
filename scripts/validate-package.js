@@ -28,6 +28,7 @@ const required = [
   'packages/openai/actionless-completion.js',
   'packages/openai/responses.js',
   'packages/openai/responses-chat-adapter.js',
+  'packages/openai/responses-tool-choice-policy.js',
   'packages/openai/recovery.js',
   'packages/openai/tool-classifier.js',
   'packages/server/create-proxy-server.js',
@@ -39,6 +40,7 @@ const required = [
   'test/responses-hosted-tools-v059.test.js',
   'test/responses-malformed-tool-retry-v059.test.js',
   'test/responses-transparent-mode-v060.test.js',
+  'test/responses-native-default-v061.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -63,7 +65,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.6.0') errors.push('package.json version must be 0.6.0');
+if (packageJson.version !== '0.6.1') errors.push('package.json version must be 0.6.1');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -92,8 +94,10 @@ if (!compose.includes('CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES')) errors.push('Comp
 if (!compose.includes('LOOP_MIN_COUNT: "3"')) errors.push('Compose must default LOOP_MIN_COUNT to 3');
 if (!compose.includes('RESPONSES_UPSTREAM_MODE')) errors.push('Compose must expose the Responses upstream mode');
 if (!compose.includes('RESPONSES_BEHAVIOR_MODE')) errors.push('Compose must expose the Responses behavior mode');
+if (!compose.includes('RESPONSES_TOOL_CHOICE_POLICY')) errors.push('Compose must expose the Responses Tool Choice policy');
+if (!compose.includes('${VLLM_PROXY_RESPONSES_TOOL_CHOICE_POLICY:-preserve}')) errors.push('Compose must default Responses Tool Choice policy to preserve');
 if (!compose.includes('${VLLM_PROXY_RESPONSES_BEHAVIOR_MODE:-transparent}')) errors.push('Compose must default Responses behavior mode to transparent');
-if (!compose.includes('${VLLM_PROXY_RESPONSES_UPSTREAM_MODE:-chat_adapter}')) errors.push('Compose must default Responses upstream mode to chat_adapter');
+if (!compose.includes('${VLLM_PROXY_RESPONSES_UPSTREAM_MODE:-native}')) errors.push('Compose must default Responses upstream mode to native');
 if (!compose.includes('ACTIONLESS_COMPLETION_GUARD_ENABLED')) errors.push('Compose must expose the Responses actionless-completion guard switch');
 if (!compose.includes('RESPONSES_HOSTED_TOOL_POLICY')) errors.push('Compose must expose the Responses Hosted Tool policy');
 if (!compose.includes('${VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY:-drop_optional}')) errors.push('Compose must default Hosted Tool policy to drop_optional');
@@ -124,6 +128,8 @@ if (!openAiRuntime.includes('detectActionlessCompletion')) errors.push('OpenAI r
 if (!openAiRuntime.includes('createResponsesChatAdapterFetch')) errors.push('OpenAI runtime must support the Responses-to-Chat upstream adapter');
 if (!openAiRuntime.includes("responsesUpstreamMode")) errors.push('OpenAI runtime must expose the Responses upstream mode');
 if (!openAiRuntime.includes('responsesBehaviorMode')) errors.push('OpenAI runtime must expose the Responses behavior mode');
+if (!openAiRuntime.includes('responsesToolChoicePolicy')) errors.push('OpenAI runtime must expose the Responses Tool Choice policy');
+if (!openAiRuntime.includes('applyResponsesToolChoicePolicy')) errors.push('OpenAI runtime must apply the Responses Tool Choice policy');
 if (!openAiRuntime.includes('behaviorGuardsEnabled')) errors.push('OpenAI runtime must support route-level behavioral guard bypass');
 if (!openAiRuntime.includes('responsesHostedToolPolicy')) errors.push('OpenAI runtime must expose Hosted Tool policy');
 if (!openAiRuntime.includes('malformed_tool_arguments_retry_completed')) errors.push('OpenAI runtime must observe malformed required-tool retry');

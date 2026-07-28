@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1 - 2026-07-28
+
+- Make vLLM native `/v1/responses` the default Codex upstream path; retain `chat_adapter` as an explicit A/B or compatibility fallback.
+- Preserve the v0.6.0 `transparent` Responses behavior default, so native model output is not discarded or automatically recovered by Proxy behavioral guards.
+- Add `RESPONSES_TOOL_CHOICE_POLICY` with default `preserve` and opt-in `required_on_explicit_continue`.
+- Add conservative Traditional Chinese and English explicit-start/continue detection. Eligible user turns with available tools rewrite only `tool_choice=auto` (or omitted) to `required`; Tool Result turns and explicit Client choices remain unchanged.
+- Add `responses_tool_choice_rewritten` diagnostics and `vllm_openai_proxy_tool_choice_rewrites_total` without logging prompt text.
+- Restrict Hosted Tool filtering diagnostics to `chat_adapter`; native mode forwards Hosted Tool declarations without false dropped-tool events.
+- Add native-default, request-integrity, Tool Result, diagnostics and fallback regression coverage.
+
 ## 0.6.0 - 2026-07-28
 
 - Make Codex `/v1/responses` behavior-transparent by default with `RESPONSES_BEHAVIOR_MODE=transparent`.

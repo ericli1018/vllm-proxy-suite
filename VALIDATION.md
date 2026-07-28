@@ -1,27 +1,30 @@
-# VLLM-PROXY-SUITE v0.6.0 Validation
+# VLLM-PROXY-SUITE v0.6.1 Validation
 
 Validated in the artifact environment:
 
-- `npm test`: 197 tests passed, 0 failed in both the source tree and a clean ZIP extraction.
-- `npm run check`: passed in both the source tree and a clean ZIP extraction.
-- All 50 JavaScript files passed `node --check` in both trees.
-- Package validator reports version `0.6.0`, 62 files, 35 required files, and `valid:true`.
-- Compose YAML parses successfully, defines one `vllm-proxy-suite` service, defaults `RESPONSES_UPSTREAM_MODE` to `chat_adapter`, and defaults `RESPONSES_BEHAVIOR_MODE` to `transparent`.
+- `npm test`: 206 tests passed, 0 failed in both the source tree and a clean final ZIP extraction.
+- `npm run check`: passed in both the source tree and a clean final ZIP extraction.
+- All 52 JavaScript files passed `node --check` in both trees.
+- Package validator reports version `0.6.1`, 64 files, 37 required files, and `valid:true`.
+- Compose YAML parses successfully, defines one `vllm-proxy-suite` service, defaults `RESPONSES_UPSTREAM_MODE` to `native`, `RESPONSES_BEHAVIOR_MODE` to `transparent`, and `RESPONSES_TOOL_CHOICE_POLICY` to `preserve`.
 - The Compose startup command passed `sh -n` after YAML parsing.
-- Single Gateway smoke passed `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`, combined `/metrics`, and graceful SIGTERM drain with exit code `0` in both source and clean trees.
-- Source and clean ZIP manifests are byte-identical at 62 files.
-- Transparent Responses mode delivers reasoning-only and narration-only `response.completed` results without Think Loop, Actionless, forced-tool, or malformed-tool automatic Recovery.
-- Transparent mode preserves Hosted Tool filtering, Chat↔Responses conversion, Function/Custom/Namespace Tool passthrough, protocol parsing, request/body/buffer limits, timeouts, cancellation, and diagnostics.
-- Non-stream reasoning-only completed JSON is accepted in transparent mode.
-- `RESPONSES_BEHAVIOR_MODE=guarded` retains the previous Actionless and behavioral Recovery flow for A/B testing.
-- OpenAI Chat Completions and Anthropic/Claude Code behavior remain covered by their existing guard/recovery tests.
+- Single Gateway smoke passed `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`, combined `/metrics`, the Tool Choice rewrite counter, and graceful SIGTERM drain with exit code `0` in both source and clean trees.
+- Source and clean ZIP manifests are byte-identical at 64 files.
+- The final ZIP root is exactly `VLLM-PROXY-SUITE/`.
+- Versioned and fixed-name ZIPs are byte-identical.
+- Native Responses is the default upstream path and preserves the original request body under the default `preserve` Tool Choice policy.
+- `required_on_explicit_continue` rewrites only eligible short user execution turns from `auto`/omitted to `required`; Tool Result turns, no-tool requests, and explicit Client choices remain unchanged.
+- Native Responses Lite `additional_tools` are included in safe request tool diagnostics.
+- `chat_adapter` remains available as an explicit fallback and retains Hosted Tool filtering diagnostics.
+- Responses remains behavior-transparent by default; no response-side Think Loop, Actionless, reasoning-only or malformed-tool automatic Recovery is introduced by this release.
 
 Not validated in this environment:
 
 - Docker image/container build or execution.
 - Live Codex → Gateway → target vLLM integration.
 - Production load, long-duration throughput, and multi-client backpressure behavior.
-- Whether removing Proxy behavioral guards alone causes every target model to continue autonomously; transparent mode intentionally leaves that decision to Codex and the model.
+- Target-model tool selection reliability under `tool_choice=auto`.
+- Whether the target vLLM/model accepts `tool_choice=required` for every Codex tool set used in production.
 
 ```bash
 node --version

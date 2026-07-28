@@ -48,6 +48,7 @@ function createMetrics() {
     requiredHostedToolsRejectedTotal: 0,
     malformedToolRetriesTotal: 0,
     malformedToolRetryFailuresTotal: 0,
+    toolChoiceRewritesTotal: 0,
   };
 }
 

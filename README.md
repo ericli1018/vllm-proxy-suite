@@ -204,25 +204,32 @@ POST /v1/responses
 Proxy 提供兩種 upstream mode：
 
 ```text
-chat_adapter（預設）
+native（預設）
+Codex Responses
+→ Proxy protocol/transport observation
+→ vLLM /v1/responses
+→ Responses protocol normalization/replay
+
+chat_adapter（明確 fallback）
 Codex Responses
 → Proxy request normalization
 → vLLM /v1/chat/completions
 → Proxy Responses JSON/SSE encoder
 → Codex
-
-native
-Codex Responses
-→ vLLM /v1/responses
-→ Responses protocol normalization/replay
 ```
 
-設定：
+預設設定：
+
+```env
+VLLM_PROXY_RESPONSES_UPSTREAM_MODE=native
+VLLM_PROXY_RESPONSES_BEHAVIOR_MODE=transparent
+VLLM_PROXY_RESPONSES_TOOL_CHOICE_POLICY=preserve
+```
+
+只有在目標 vLLM 原生 Responses 不可用或需要 A/B 比較時，才切換：
 
 ```env
 VLLM_PROXY_RESPONSES_UPSTREAM_MODE=chat_adapter
-VLLM_PROXY_RESPONSES_BEHAVIOR_MODE=transparent
-# 或 native
 ```
 
 `chat_adapter` 支援：
@@ -283,6 +290,36 @@ VLLM_PROXY_RESPONSES_BEHAVIOR_MODE=guarded
 ```
 
 `ACTIONLESS_COMPLETION_GUARD_ENABLED`、`MAX_RECOVERY_ATTEMPTS` 與 malformed-tool retry 設定只在 `guarded` 模式生效。OpenAI Chat Completions 與 Anthropic／Claude Code runtime 不受此 Responses 專用模式影響。
+
+### Responses Tool Choice Policy
+
+預設保留 Codex 原始工具選擇：
+
+```env
+VLLM_PROXY_RESPONSES_TOOL_CHOICE_POLICY=preserve
+```
+
+可選值：
+
+| 值 | 行為 |
+|---|---|
+| `preserve` | 不改寫 `tool_choice`；這是預設，也是最接近 vLLM 原生 Responses 的模式 |
+| `required_on_explicit_continue` | 只有最新有效輸入是短而明確的 user「開始／繼續」指令、存在可用工具，且原始選擇為 `auto`／未指定時，才將 upstream `tool_choice` 改為 `required` |
+
+`required_on_explicit_continue` 不會改寫：
+
+- `function_call_output`／`custom_tool_call_output` Tool Result 回合。
+- 沒有工具的請求。
+- Client 明確指定的 `none`、`required` 或特定 Function。
+- 一般長任務描述、技術問答或完成摘要。
+
+它是 request-side 約束，不是 response Guard：不丟棄生成、不追加 Recovery，也不產生第二次 upstream request。啟用範例：
+
+```env
+VLLM_PROXY_RESPONSES_UPSTREAM_MODE=native
+VLLM_PROXY_RESPONSES_BEHAVIOR_MODE=transparent
+VLLM_PROXY_RESPONSES_TOOL_CHOICE_POLICY=required_on_explicit_continue
+```
 
 ### Hosted Tool Policy
 
@@ -518,8 +555,9 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `LOOP_MAX_PATTERN_SIZE` | `2048` |
 | `LOOP_MIN_COUNT` | `3`，exact／normalized／ABAB 三種偵測都必須達到此重複次數 |
 | `LOOP_REASONING_CHAR_LIMIT` | `24000` |
-| `RESPONSES_UPSTREAM_MODE` | `chat_adapter`；可設為 `native`。Compose 對外變數為 `VLLM_PROXY_RESPONSES_UPSTREAM_MODE` |
+| `RESPONSES_UPSTREAM_MODE` | `native`；可設為 `chat_adapter`。Compose 對外變數為 `VLLM_PROXY_RESPONSES_UPSTREAM_MODE` |
 | `RESPONSES_BEHAVIOR_MODE` | `transparent`；設為 `guarded` 才啟用 Responses 行為判定與 Recovery |
+| `RESPONSES_TOOL_CHOICE_POLICY` | `preserve`；可設為 `required_on_explicit_continue` |
 | `ACTIONLESS_COMPLETION_GUARD_ENABLED` | `true`，但只在 `RESPONSES_BEHAVIOR_MODE=guarded` 時生效 |
 | `TOTAL_GENERATION_TIMEOUT_MS` | `1800000` |
 | `RECOVERY_TIMEOUT_MS` | `900000` |

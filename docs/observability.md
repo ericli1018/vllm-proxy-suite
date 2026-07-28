@@ -117,6 +117,47 @@ responsesUpstreamMode="chat_adapter"
 
 In `chat_adapter` mode, upstream network traffic goes to `/v1/chat/completions`, but all attempt/replay/Tool lifecycle logs remain protocol=`vllm_openai_proxy`, path=`/v1/responses` because the route-scoped adapter reconstructs Responses before the common attempt runner observes it.
 
+Default deployment reports:
+
+```text
+responsesUpstreamMode="native"
+responsesBehaviorMode="transparent"
+responsesToolChoicePolicy="preserve"
+```
+
+Native mode does not emit `responses_hosted_tools_filtered`; Hosted Tool declarations are forwarded to vLLM unchanged. Hosted filtering and its counters apply only to `chat_adapter`.
+
+## Responses Tool Choice Policy diagnostics
+
+Every `/v1/responses` `request_tool_context` includes:
+
+```text
+responsesToolChoicePolicy="preserve" | "required_on_explicit_continue"
+originalToolChoice="auto|required|none|explicit"
+effectiveToolChoice="auto|required|none|explicit"
+toolChoiceRewritten=false|true
+latestInputKind="user|tool_result|..."
+explicitContinueDetected=false|true
+```
+
+When an eligible explicit user execution turn is rewritten before upstream contact:
+
+```text
+event=responses_tool_choice_rewritten
+responsesToolChoicePolicy="required_on_explicit_continue"
+originalToolChoice="auto"
+effectiveToolChoice="required"
+toolChoiceRewritten=true
+```
+
+Prometheus counter:
+
+```text
+vllm_openai_proxy_tool_choice_rewrites_total
+```
+
+This policy creates no Recovery attempt. Tool Result turns retain the Client's original `tool_choice`.
+
 Unsupported adapter features terminate before upstream contact:
 
 ```text

@@ -14,7 +14,12 @@ function normalizeToolChoice(choice, toolCount) {
 }
 
 export function summarizeOpenAiToolContext(body = {}) {
-  const tools = Array.isArray(body.tools) ? body.tools : [];
+  const tools = Array.isArray(body.tools) ? [...body.tools] : [];
+  if (Array.isArray(body.input)) {
+    for (const item of body.input) {
+      if (item?.type === 'additional_tools' && Array.isArray(item.tools)) tools.push(...item.tools);
+    }
+  }
   const names = tools.map((tool) => toolName(tool)).filter(Boolean);
   const requestToolChoice = normalizeToolChoice(body.tool_choice, tools.length);
   return {

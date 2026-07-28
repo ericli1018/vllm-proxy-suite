@@ -407,6 +407,10 @@ export const chatCompletionsAdapter = Object.freeze({
   path: '/v1/chat/completions',
   createStreamParser(config) { return new ChatCompletionsStreamParser(config); },
   getReasoning(result) { return [...result.choices.values()].map((choice) => choice.reasoning).filter(Boolean); },
+  shouldDetectReasoningLoop(_result, semantic) {
+    return semantic.contentBytes === 0
+      && semantic.toolCallCount === 0;
+  },
   completionDiagnostics(result) { return collectCompletionDiagnostics(result); },
   semanticMetrics(result) {
     if (result.semanticMetrics) {

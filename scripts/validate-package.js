@@ -31,6 +31,7 @@ const required = [
   'packages/server/create-proxy-server.js',
   'test/tool-passthrough-v053.test.js',
   'test/responses-support-v055.test.js',
+  'test/loop-terminal-v056.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -55,7 +56,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.5.5') errors.push('package.json version must be 0.5.5');
+if (packageJson.version !== '0.5.6') errors.push('package.json version must be 0.5.6');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -81,6 +82,7 @@ if (!compose.includes('TOOL_ARGUMENT_CRITICAL_BYTES')) errors.push('Compose must
 if (!compose.includes('TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES')) errors.push('Compose must expose Tool passthrough observation bound');
 if (!compose.includes('CLIENT_RETRY_FINGERPRINT_TTL_MS')) errors.push('Compose must expose client retry fingerprint TTL');
 if (!compose.includes('CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES')) errors.push('Compose must expose client retry fingerprint capacity');
+if (!compose.includes('LOOP_MIN_COUNT: "3"')) errors.push('Compose must default LOOP_MIN_COUNT to 3');
 
 const servicesPart = compose.split(/^services:\s*$/m)[1] || '';
 const serviceNames = [...servicesPart.matchAll(/^  ([a-zA-Z0-9_-]+):$/gm)].map((match) => match[1]);

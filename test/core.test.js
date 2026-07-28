@@ -20,7 +20,7 @@ test('loadCommonConfig applies bounded defaults and valid overrides', () => {
 });
 
 test('detectReasoningLoop detects exact and normalized repeated reasoning', () => {
-  const config = loadCommonConfig({ LOOP_MIN_PATTERN_SIZE: '8', LOOP_MAX_PATTERN_SIZE: '256' });
+  const config = loadCommonConfig({ LOOP_MIN_PATTERN_SIZE: '8', LOOP_MAX_PATTERN_SIZE: '256', LOOP_MIN_COUNT: '2' });
   const exact = detectReasoningLoop('先檢查來源與限制。先檢查來源與限制。', config);
   assert.equal(exact?.reason, 'repeated_reasoning_segment');
 
@@ -29,7 +29,7 @@ test('detectReasoningLoop detects exact and normalized repeated reasoning', () =
 });
 
 test('detectReasoningLoop detects ABAB line cycles', () => {
-  const config = loadCommonConfig({ LOOP_MIN_PATTERN_SIZE: '4' });
+  const config = loadCommonConfig({ LOOP_MIN_PATTERN_SIZE: '4', LOOP_MIN_COUNT: '2' });
   const result = detectReasoningLoop('分析假設 A\n檢查假設 B\n分析假設 A\n檢查假設 B\n', config);
   assert.equal(result?.reason, 'abab_reasoning_lines');
 });

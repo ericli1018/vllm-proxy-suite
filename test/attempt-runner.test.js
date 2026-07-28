@@ -84,7 +84,7 @@ test('performBufferedAttempt aborts and marks a reasoning loop', async () => {
     requestBody: '{}',
     streaming: true,
     adapter: createAdapter(),
-    config: loadCommonConfig({ LOOP_MIN_PATTERN_SIZE: '8', LOOP_MAX_PATTERN_SIZE: '128' }),
+    config: loadCommonConfig({ LOOP_MIN_PATTERN_SIZE: '8', LOOP_MAX_PATTERN_SIZE: '128', LOOP_MIN_COUNT: '2' }),
     requestId: 'loop',
     bufferBudget: new BufferBudget(4096),
     timeoutMs: 5000,

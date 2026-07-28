@@ -91,6 +91,23 @@ Responses:        output:<index>/call:<id>
 Anthropic:        block:<index>
 ```
 
+## Responses Think Loop action boundary
+
+For `/v1/responses`, `loop_detected` is permitted only while the Attempt contains reasoning and no action or terminal marker. The guard closes when any visible output/refusal, Function Call, or response terminal event is observed.
+
+A normal successful sequence may therefore contain repeated reasoning but must still end as:
+
+```text
+request_progress responseTerminal=true responseStatus="completed" contentBytes>0
+response_replay_started
+response_replay_completed
+request_completed status=200
+```
+
+It must not emit `loop_detected` or `recovery_started` after that boundary. If Codex reports `stream closed before response.completed`, verify whether the Proxy logged a valid terminal event followed by a loop event; v0.5.6 prevents that ordering.
+
+`LOOP_MIN_COUNT` defaults to `3` and is applied consistently to exact, normalized, and ABAB cycles. Tests that intentionally exercise two-repeat recovery must set it explicitly to `2`.
+
 ## OpenAI Tool passthrough lifecycle
 
 OpenAI Chat Completions and Responses use a pre-Tool protected phase and a post-Tool transparent phase.

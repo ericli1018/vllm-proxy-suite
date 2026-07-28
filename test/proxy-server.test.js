@@ -30,6 +30,7 @@ function baseConfig(upstream) {
       MAX_TOTAL_BUFFERED_BYTES: '1048576',
       MAX_RESPONSE_BUFFER_BYTES: '1048576',
       LOOP_MIN_PATTERN_SIZE: '8',
+      LOOP_MIN_COUNT: '2',
     }),
     port: 0,
   });

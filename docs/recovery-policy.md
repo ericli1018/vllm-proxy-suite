@@ -32,7 +32,20 @@ ORIGINAL_ATTEMPT
 
 If an OpenAI Recovery generation emits a Tool Call, that Recovery response crosses the same transparent commit boundary. Post-generation forced-Tool validation cannot revoke bytes already delivered.
 
-For `/v1/responses`, a terminal `status="incomplete"` or `status="cancelled"` is protocol-valid even when it contains only reasoning and no visible output. It is replayed unchanged and does not trigger `reasoning_without_output` Recovery. The official `response.incomplete` event and the vLLM variant `response.completed` with an embedded incomplete status are treated equivalently. `status="failed"` and explicit upstream errors remain invalid.
+For `/v1/responses`, terminal protocol state has priority over Think Loop classification. Once any of the following appears, the reasoning-loop guard is permanently closed for that Attempt:
+
+```text
+output text or refusal
+Function Call
+response.completed
+response.incomplete
+response.failed
+response.cancelled
+```
+
+A valid completed response is replayed even if its preceding reasoning contains a repeated suffix. A terminal `status="incomplete"` or `status="cancelled"` is protocol-valid even when it contains only reasoning and no visible output. It is replayed unchanged and does not trigger `reasoning_without_output` Recovery. The official `response.incomplete` event and the vLLM variant `response.completed` with an embedded incomplete status are treated equivalently. `status="failed"` and explicit upstream errors remain invalid.
+
+Before an action boundary, exact suffix, normalized suffix, and ABAB line-cycle detection all require `LOOP_MIN_COUNT` repetitions. The default is `3`; two repeats alone are not treated as a loop.
 
 ## OpenAI Chat System Message contract
 

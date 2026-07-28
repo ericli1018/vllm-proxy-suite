@@ -15,3 +15,7 @@
 13. Runtime Git synchronization force-resets the named volume to the configured ref on container start. Pin `VLLM_PROXY_SUITE_REF` or build the Dockerfile for immutable deployment.
 14. A valid Responses `status="incomplete"` is delivered unchanged. The Proxy does not automatically continue the response, increase `max_output_tokens`, or synthesize visible output from reasoning; the Client owns continuation policy.
 15. Live integration with the target vLLM, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
+
+## Think Loop heuristic
+
+Think Loop detection remains heuristic before an action boundary. The default requires three repeated cycles, but unusual repetitive reasoning may still trigger Recovery before output, refusal, Function Call, or terminal response state appears. After an OpenAI action boundary, loop detection is disabled for that Attempt.

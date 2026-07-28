@@ -21,7 +21,7 @@ OpenAI SDK / OpenAI-compatible Client
 - OpenAI Chat Completions／Responses 在第一個 Tool Call 前保持 Protected Streaming；第一個 Tool delta 出現後立即切換成透明直送。
 - OpenAI Tool commit 後不阻擋、不修補、不拆分、不重寫 Tool arguments，也不再執行 Recovery；Proxy 只保留有界觀測與計數。
 - OpenAI 沒有 Tool Call 的回應仍保留上游原始 response bytes，通過驗證後回放。
-- OpenAI Responses 將 `completed`、`incomplete` 與 `failed` 視為協議終止狀態；`incomplete`（包含只有 reasoning 的 `max_output_tokens` 結果）以原始 HTTP 200／SSE bytes 回放，不改寫成 Proxy 錯誤。
+- OpenAI Responses 將 `completed`、`incomplete` 與 `failed` 視為協議終止狀態；terminal event、可見 output、refusal 或 Function Call 具有高於 Think Loop 的優先權，合法結果會原樣回放。`incomplete`（包含只有 reasoning 的 `max_output_tokens` 結果）以原始 HTTP 200／SSE bytes 回放，不改寫成 Proxy 錯誤。
 - OpenAI Recovery 只在 Tool commit 前使用當次 request 真正提供的網路查詢或下載工具，不預設固定工具名稱。
 - OpenAI Chat 的 System Message 契約固定為最多一個且只能位於 `messages[0]`；Proxy 產生 Recovery 時會合併至該開頭訊息，Client 提供中途 System Message 則在進入 vLLM 前回傳明確 `400`。
 - Claude Code Tool Recovery 只載入 Anthropic runtime，不會影響 OpenAI API。
@@ -213,6 +213,8 @@ Client 應依 `status` 與 `incomplete_details` 決定是否提高 `max_output_t
 
 Proxy 解析並觀測官方 Responses done/final events，包括 reasoning、summary、output text、refusal 與 function-call arguments；即使沒有先行 delta，terminal response 的完整 `output[]` 仍可作為權威結果。
 
+Responses Think Loop Guard 只在模型仍處於純 reasoning、尚未產生 output/refusal/Function Call、且尚未收到 terminal event 時啟用。一旦任一 action boundary 出現，後續 reasoning 即使包含重複片段，也不能覆蓋合法 `response.completed`。這可避免 Codex 已有完整 terminal event，Proxy 卻丟棄它並造成 `stream closed before response.completed`。
+
 ## Loop Guard 與 OpenAI Tool Passthrough
 
 ### Anthropic／無 Tool 的 OpenAI 回應
@@ -220,7 +222,9 @@ Proxy 解析並觀測官方 Responses done/final events，包括 reasoning、sum
 ```text
 Upstream Attempt
 → 完整緩衝與增量解析
-→ Loop／結構／容量／語意驗證
+→ OpenAI Responses：只在 pre-action reasoning 階段執行 Loop Guard
+→ terminal/output/refusal/Function Call 出現後關閉 Loop Guard
+→ 結構／容量／語意驗證
 ├── 成功：原始 bytes 回放
 └── 失敗：整份 Attempt 丟棄 → Recovery 一次 → 驗證 → 回放
 ```
@@ -327,6 +331,10 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `VLLM_OPENAI_PROXY_API_KEY` | 無 |
 | `MAX_RECOVERY_ATTEMPTS` | `1` |
 | `HEARTBEAT_INTERVAL_MS` | `10000` |
+| `LOOP_MIN_PATTERN_SIZE` | `24` |
+| `LOOP_MAX_PATTERN_SIZE` | `2048` |
+| `LOOP_MIN_COUNT` | `3`，exact／normalized／ABAB 三種偵測都必須達到此重複次數 |
+| `LOOP_REASONING_CHAR_LIMIT` | `24000` |
 | `TOTAL_GENERATION_TIMEOUT_MS` | `1800000` |
 | `RECOVERY_TIMEOUT_MS` | `900000` |
 | `MAX_ACTIVE_REQUESTS` | `256`，每個 protocol runtime 各自計算 |
@@ -341,7 +349,7 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `CLIENT_RETRY_FINGERPRINT_TTL_MS` | `900000` |
 | `CLIENT_RETRY_FINGERPRINT_MAX_ENTRIES` | `10000` |
 
-`TOOL_ARGUMENT_WARNING_BYTES` 與 `TOOL_ARGUMENT_CRITICAL_BYTES` 只發出診斷事件，不會截斷或改寫 Tool arguments。`MAX_TOOL_ARGUMENT_BYTES` 仍用於受保護的驗證路徑；OpenAI Tool Call 一旦 commit，任何大小或 JSON 狀態都只能 observe-only，不能撤銷已送出的 stream。`TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES` 只限制 Proxy 內部保留的 arguments 前綴，總 byte／fragment counters 仍精確。Client retry fingerprint 使用 path 與原始 request body 的精確 SHA-256；只辨識 byte-identical retry，不會對相似 prompt 做模糊比對。
+`LOOP_MIN_COUNT` 的 production 預設為 `3`；兩次自然重複不再直接構成 Think Loop。`TOOL_ARGUMENT_WARNING_BYTES` 與 `TOOL_ARGUMENT_CRITICAL_BYTES` 只發出診斷事件，不會截斷或改寫 Tool arguments。`MAX_TOOL_ARGUMENT_BYTES` 仍用於受保護的驗證路徑；OpenAI Tool Call 一旦 commit，任何大小或 JSON 狀態都只能 observe-only，不能撤銷已送出的 stream。`TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES` 只限制 Proxy 內部保留的 arguments 前綴，總 byte／fragment counters 仍精確。Client retry fingerprint 使用 path 與原始 request body 的精確 SHA-256；只辨識 byte-identical retry，不會對相似 prompt 做模糊比對。
 
 ### Claude Code Recovery
 
@@ -416,6 +424,7 @@ LOG_LEVEL: "debug"
 LOG_FORMAT: "text"
 PROGRESS_LOG_INTERVAL_MS: "10000"
 PROGRESS_STALL_WARNING_MS: "30000"
+LOOP_MIN_COUNT: "3"
 LOG_TOOL_PAYLOADS: "false"
 TOOL_ARGUMENT_WARNING_BYTES: "8192"
 TOOL_ARGUMENT_CRITICAL_BYTES: "16384"

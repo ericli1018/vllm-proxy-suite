@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.6 - 2026-07-28
+
+- Fixed successful `/v1/responses` terminal results being overridden by `repeated_reasoning_segment`, which discarded valid `response.completed` events and caused Codex to report `stream closed before response.completed`.
+- Added adapter-controlled reasoning-loop eligibility. Responses loop detection now runs only before visible output, refusal, Function Call, or any terminal event; valid completed/incomplete/cancelled responses are replayed instead of recovered.
+- Added the same OpenAI action boundary to Chat Completions after visible content or Tool Call, while preserving reasoning-only loop recovery when no action has occurred.
+- Made exact suffix, normalized suffix, and ABAB line-cycle detection honor `LOOP_MIN_COUNT` consistently.
+- Raised the production default `LOOP_MIN_COUNT` from `2` to `3` to reduce false positives from short natural repetition.
+- Added unit, attempt-runner, and live Gateway regressions proving completed Responses output survives repeated reasoning, output permanently closes the loop guard, and true three-repeat pre-action loops remain recoverable.
+
 ## 0.5.5 - 2026-07-28
 
 - Fixed `/v1/responses` incorrectly converting valid reasoning-only `status:"incomplete"` results into the custom `reasoning_without_output` error and Recovery.

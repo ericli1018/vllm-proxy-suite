@@ -26,6 +26,11 @@ function detectFromTexts(texts, config) {
   return null;
 }
 
+function shouldDetectReasoningLoop(adapter, result, semantic, phase) {
+  if (typeof adapter.shouldDetectReasoningLoop !== 'function') return true;
+  return Boolean(adapter.shouldDetectReasoningLoop(result, semantic, { phase }));
+}
+
 async function readBoundedText(response, limit = 4096) {
   const text = await response.text().catch(() => '');
   return text.slice(0, limit);
@@ -321,7 +326,9 @@ export async function performBufferedAttempt({
           attemptNumber,
         };
       }
-      const loopInfo = detectFromTexts(adapter.getJsonReasoning?.(result) || [], config);
+      const loopInfo = shouldDetectReasoningLoop(adapter, result, semantic, 'json')
+        ? detectFromTexts(adapter.getJsonReasoning?.(result) || [], config)
+        : null;
       if (loopInfo) return { kind: 'loop', loopInfo, result };
       const validation = withAdapterDiagnostics(adapter, result, adapter.validateJson(result, config));
       if (!validation.ok) return { kind: 'invalid', ...validation, result };
@@ -469,7 +476,9 @@ export async function performBufferedAttempt({
             await reader.cancel(incremental.reason).catch(() => {});
             return { kind: 'invalid', ...incremental, result: lastSnapshot };
           }
-          const loopInfo = detectFromTexts(adapter.getReasoning(lastSnapshot) || [], config);
+          const loopInfo = shouldDetectReasoningLoop(adapter, lastSnapshot, semantic, 'incremental')
+            ? detectFromTexts(adapter.getReasoning(lastSnapshot) || [], config)
+            : null;
           if (loopInfo) {
             controller.abort(loopInfo.reason);
             await reader.cancel(loopInfo.reason).catch(() => {});
@@ -553,7 +562,9 @@ export async function performBufferedAttempt({
 
     concatAllocated = true;
     setState('attempt_validating');
-    const finalLoop = detectFromTexts(adapter.getReasoning(result) || [], config);
+    const finalLoop = shouldDetectReasoningLoop(adapter, result, semantic, 'final')
+      ? detectFromTexts(adapter.getReasoning(result) || [], config)
+      : null;
     if (finalLoop) return { kind: 'loop', loopInfo: finalLoop, result };
     const validation = withAdapterDiagnostics(adapter, result, adapter.validateStream(result, config));
     if (!validation.ok) return { kind: 'invalid', ...validation, result };

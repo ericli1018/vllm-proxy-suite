@@ -38,6 +38,7 @@ function rawIndex(mapping, normalizedIndex, fallback) {
 
 function detectExactSuffixRepeat(text, config) {
   const minSize = Math.max(4, config.loopMinPatternSize ?? 24);
+  const minCount = Math.max(2, config.loopMinCount ?? 3);
   const maxSize = Math.min(config.loopMaxPatternSize ?? 2048, Math.floor(text.length / 2));
   for (let size = maxSize; size >= minSize; size -= 1) {
     const lastStart = text.length - size;
@@ -51,6 +52,7 @@ function detectExactSuffixRepeat(text, config) {
       cycleStart -= size;
       count += 1;
     }
+    if (count < minCount) continue;
     return {
       reason: 'repeated_reasoning_segment',
       cycleStart,
@@ -62,14 +64,28 @@ function detectExactSuffixRepeat(text, config) {
   return null;
 }
 
-function detectAbabLines(text) {
+function detectAbabLines(text, config) {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (lines.length < 4) return null;
-  for (let i = 0; i <= lines.length - 4; i += 1) {
-    const [a, b, c, d] = lines.slice(i, i + 4);
-    if (a === c && b === d && a !== b && a.length + b.length >= 8) {
-      return { reason: 'abab_reasoning_lines', cycleStart: 0, cycleLength: a.length + b.length, retainEnd: a.length + b.length, repeatCount: 2 };
+  const minCount = Math.max(2, config.loopMinCount ?? 3);
+  if (lines.length < minCount * 2) return null;
+  for (let i = 0; i <= lines.length - (minCount * 2); i += 1) {
+    const a = lines[i];
+    const b = lines[i + 1];
+    if (a === b || a.length + b.length < 8) continue;
+    let count = 1;
+    let cursor = i + 2;
+    while (cursor + 1 < lines.length && lines[cursor] === a && lines[cursor + 1] === b) {
+      count += 1;
+      cursor += 2;
     }
+    if (count < minCount) continue;
+    return {
+      reason: 'abab_reasoning_lines',
+      cycleStart: 0,
+      cycleLength: a.length + b.length,
+      retainEnd: a.length + b.length,
+      repeatCount: count,
+    };
   }
   return null;
 }
@@ -78,7 +94,7 @@ export function detectReasoningLoop(text, config) {
   if (typeof text !== 'string' || text.length === 0) return null;
   if (looksLikeCodeOrLogs(text)) return null;
 
-  const abab = detectAbabLines(text);
+  const abab = detectAbabLines(text, config);
   if (abab) return abab;
 
   const exact = detectExactSuffixRepeat(text, config);
@@ -87,7 +103,7 @@ export function detectReasoningLoop(text, config) {
   const mapping = normalizeWithMap(text);
   const normalized = mapping.normalized;
   const minSize = Math.max(4, config.loopMinPatternSize ?? 24);
-  const minCount = Math.max(2, config.loopMinCount ?? 2);
+  const minCount = Math.max(2, config.loopMinCount ?? 3);
   const maxSize = Math.min(config.loopMaxPatternSize ?? 2048, Math.floor(normalized.length / minCount));
 
   for (let size = maxSize; size >= minSize; size -= 1) {
@@ -103,6 +119,7 @@ export function detectReasoningLoop(text, config) {
       cycleStartNormalized -= size;
       count += 1;
     }
+    if (count < minCount) continue;
     const cycleStart = rawIndex(mapping, cycleStartNormalized, text.length);
     const retainEnd = rawIndex(mapping, cycleStartNormalized + size, text.length);
     const secondEnd = rawIndex(mapping, cycleStartNormalized + size * 2, text.length);

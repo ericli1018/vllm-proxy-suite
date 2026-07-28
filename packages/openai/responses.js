@@ -513,6 +513,11 @@ export const responsesAdapter = Object.freeze({
   path: '/v1/responses',
   createStreamParser(config) { return new ResponsesStreamParser(config); },
   getReasoning(result) { return result.reasoning ? [result.reasoning] : []; },
+  shouldDetectReasoningLoop(_result, semantic) {
+    return !semantic.responseTerminal
+      && semantic.contentBytes === 0
+      && semantic.toolCallCount === 0;
+  },
   completionDiagnostics(result) { return collectCompletionDiagnostics(result); },
   semanticMetrics(result) {
     if (result.semanticMetrics) return { ...result.semanticMetrics, sseEvents: result.eventCount || 0 };

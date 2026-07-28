@@ -62,7 +62,7 @@ export function loadCommonConfig(env = process.env, defaults = {}) {
     maxToolCalls: parseInteger(env.MAX_TOOL_CALLS, 128, { min: 1 }),
     loopMinPatternSize: parseInteger(env.LOOP_MIN_PATTERN_SIZE, 24, { min: 4 }),
     loopMaxPatternSize: parseInteger(env.LOOP_MAX_PATTERN_SIZE, 2048, { min: 8 }),
-    loopMinCount: parseInteger(env.LOOP_MIN_COUNT, 2, { min: 2 }),
+    loopMinCount: parseInteger(env.LOOP_MIN_COUNT, 3, { min: 2 }),
     loopReasoningCharLimit: parseInteger(env.LOOP_REASONING_CHAR_LIMIT, 24000, { min: 128 }),
     loopScanIntervalChars: parseInteger(env.LOOP_SCAN_INTERVAL_CHARS, 64, { min: 8 }),
     logLevel: env.LOG_LEVEL || defaults.logLevel || 'info',

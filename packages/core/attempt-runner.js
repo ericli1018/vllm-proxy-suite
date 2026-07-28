@@ -73,6 +73,12 @@ function emptySemanticMetrics() {
   };
 }
 
+function applyBehaviorValidationPolicy(validation, behaviorGuardsEnabled) {
+  if (!validation || validation.ok || behaviorGuardsEnabled) return validation;
+  if (validation.reason === 'reasoning_without_output') return { ok: true };
+  return validation;
+}
+
 function withAdapterDiagnostics(adapter, result, validation) {
   if (!validation || validation.ok) return validation;
   const completion = adapter.completionDiagnostics?.(result) || {};
@@ -129,6 +135,7 @@ export async function performBufferedAttempt({
   observer = null,
   attemptNumber = 1,
   toolPassthrough = null,
+  behaviorGuardsEnabled = true,
 }) {
   const controller = new AbortController();
   const onClientAbort = () => controller.abort('client_cancelled');
@@ -326,11 +333,14 @@ export async function performBufferedAttempt({
           attemptNumber,
         };
       }
-      const loopInfo = shouldDetectReasoningLoop(adapter, result, semantic, 'json')
+      const loopInfo = behaviorGuardsEnabled && shouldDetectReasoningLoop(adapter, result, semantic, 'json')
         ? detectFromTexts(adapter.getJsonReasoning?.(result) || [], config)
         : null;
       if (loopInfo) return { kind: 'loop', loopInfo, result };
-      const validation = withAdapterDiagnostics(adapter, result, adapter.validateJson(result, config));
+      const validation = applyBehaviorValidationPolicy(
+        withAdapterDiagnostics(adapter, result, adapter.validateJson(result, config)),
+        behaviorGuardsEnabled,
+      );
       if (!validation.ok) return { kind: 'invalid', ...validation, result };
       return { kind: 'success', rawBody, result, status: response.status, headers: response.headers };
     }
@@ -476,7 +486,7 @@ export async function performBufferedAttempt({
             await reader.cancel(incremental.reason).catch(() => {});
             return { kind: 'invalid', ...incremental, result: lastSnapshot };
           }
-          const loopInfo = shouldDetectReasoningLoop(adapter, lastSnapshot, semantic, 'incremental')
+          const loopInfo = behaviorGuardsEnabled && shouldDetectReasoningLoop(adapter, lastSnapshot, semantic, 'incremental')
             ? detectFromTexts(adapter.getReasoning(lastSnapshot) || [], config)
             : null;
           if (loopInfo) {
@@ -562,11 +572,14 @@ export async function performBufferedAttempt({
 
     concatAllocated = true;
     setState('attempt_validating');
-    const finalLoop = shouldDetectReasoningLoop(adapter, result, semantic, 'final')
+    const finalLoop = behaviorGuardsEnabled && shouldDetectReasoningLoop(adapter, result, semantic, 'final')
       ? detectFromTexts(adapter.getReasoning(result) || [], config)
       : null;
     if (finalLoop) return { kind: 'loop', loopInfo: finalLoop, result };
-    const validation = withAdapterDiagnostics(adapter, result, adapter.validateStream(result, config));
+    const validation = applyBehaviorValidationPolicy(
+      withAdapterDiagnostics(adapter, result, adapter.validateStream(result, config)),
+      behaviorGuardsEnabled,
+    );
     if (!validation.ok) return { kind: 'invalid', ...validation, result };
     return { kind: 'success', rawBody: Buffer.concat(chunks), result, status: response.status, headers: response.headers };
   } finally {

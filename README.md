@@ -214,13 +214,14 @@ Codex Responses
 native
 Codex Responses
 → vLLM /v1/responses
-→ 原有 Responses guard/replay
+→ Responses protocol normalization/replay
 ```
 
 設定：
 
 ```env
 VLLM_PROXY_RESPONSES_UPSTREAM_MODE=chat_adapter
+VLLM_PROXY_RESPONSES_BEHAVIOR_MODE=transparent
 # 或 native
 ```
 
@@ -248,6 +249,40 @@ VLLM_PROXY_RESPONSES_UPSTREAM_MODE=chat_adapter
 - 未支援的 content block。
 
 需要上述原生 Responses 功能時，改用 `native`；不要在已開始生成後自動 fallback，以避免重複 Tool action。
+
+
+### Responses behavior 模式
+
+Codex 路徑預設採透明行為模式：
+
+```env
+VLLM_PROXY_RESPONSES_BEHAVIOR_MODE=transparent
+```
+
+`transparent` 只負責協議與傳輸，不替模型決定是否應繼續工作。以下結果都會原樣交付 Codex：
+
+- reasoning-only `response.completed`。
+- 有文字但沒有 Tool Call 的完成回應。
+- 短完成宣告、執行敘述或模型自行回報的工具狀態。
+- 可被解析的 `response.incomplete`／`response.completed` terminal。
+
+透明模式不執行：
+
+- Responses Think Loop classification。
+- `reasoning_without_output` rejection。
+- Actionless Completion Recovery。
+- forced-tool Recovery validation。
+- malformed required-tool automatic retry。
+
+仍保留：Chat↔Responses conversion、Hosted Tool filtering、Tool passthrough、格式解析、認證、request/body/buffer limits、timeout、client cancellation 與 observability。
+
+需要重現舊行為作 A/B 排障時：
+
+```env
+VLLM_PROXY_RESPONSES_BEHAVIOR_MODE=guarded
+```
+
+`ACTIONLESS_COMPLETION_GUARD_ENABLED`、`MAX_RECOVERY_ATTEMPTS` 與 malformed-tool retry 設定只在 `guarded` 模式生效。OpenAI Chat Completions 與 Anthropic／Claude Code runtime 不受此 Responses 專用模式影響。
 
 ### Hosted Tool Policy
 
@@ -284,7 +319,7 @@ Actionless Completion Recovery 或原始 `tool_choice="required"` 可能讓模�
 BadRequestError: Unterminated string ...
 ```
 
-`chat_adapter` 預設只做一次受限重試：
+`guarded` behavior 模式下，`chat_adapter` 可做一次受限重試；預設 `transparent` 模式不執行此重試：
 
 ```env
 VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RETRY_ENABLED=true
@@ -330,7 +365,7 @@ Client 應依 `status` 與 `incomplete_details` 決定是否提高 `max_output_t
 
 Proxy 解析並觀測官方 Responses done/final events，包括 reasoning、summary、output text、refusal 與 function-call arguments；即使沒有先行 delta，terminal response 的完整 `output[]` 仍可作為權威結果。
 
-Responses Think Loop Guard 只在模型仍處於純 reasoning、尚未產生 output/refusal/Function Call、且尚未收到 terminal event 時啟用。一旦任一 action boundary 出現，後續 reasoning 即使包含重複片段，也不能覆蓋合法 `response.completed`。這可避免 Codex 已有完整 terminal event，Proxy 卻丟棄它並造成 `stream closed before response.completed`。
+只有 `RESPONSES_BEHAVIOR_MODE=guarded` 時，Responses Think Loop Guard 才會在模型仍處於純 reasoning、尚未產生 output/refusal/Function Call、且尚未收到 terminal event 時啟用。一旦任一 action boundary 出現，後續 reasoning 即使包含重複片段，也不能覆蓋合法 `response.completed`。這可避免 Codex 已有完整 terminal event，Proxy 卻丟棄它並造成 `stream closed before response.completed`。
 
 ### Responses Actionless Completion Guard
 
@@ -484,7 +519,8 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `LOOP_MIN_COUNT` | `3`，exact／normalized／ABAB 三種偵測都必須達到此重複次數 |
 | `LOOP_REASONING_CHAR_LIMIT` | `24000` |
 | `RESPONSES_UPSTREAM_MODE` | `chat_adapter`；可設為 `native`。Compose 對外變數為 `VLLM_PROXY_RESPONSES_UPSTREAM_MODE` |
-| `ACTIONLESS_COMPLETION_GUARD_ENABLED` | `true`，只套用 `/v1/responses` 的敘述但未行動完成防護 |
+| `RESPONSES_BEHAVIOR_MODE` | `transparent`；設為 `guarded` 才啟用 Responses 行為判定與 Recovery |
+| `ACTIONLESS_COMPLETION_GUARD_ENABLED` | `true`，但只在 `RESPONSES_BEHAVIOR_MODE=guarded` 時生效 |
 | `TOTAL_GENERATION_TIMEOUT_MS` | `1800000` |
 | `RECOVERY_TIMEOUT_MS` | `900000` |
 | `MAX_ACTIVE_REQUESTS` | `256`，每個 protocol runtime 各自計算 |

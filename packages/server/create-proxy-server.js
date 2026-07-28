@@ -310,7 +310,11 @@ export function createProtocolProxyRuntime({
       return jsonResponse(response, status, formatJsonError(type, message, requestId), extraHeaders);
     };
 
-    requestLogger.info('request_started', { guarded: guardedRoutes.has(path) });
+    const selectedRoute = guardedRoutes.get(path);
+    requestLogger.info('request_started', {
+      guarded: guardedRoutes.has(path),
+      ...(selectedRoute ? { behaviorGuardsEnabled: selectedRoute.behaviorGuardsEnabled !== false } : {}),
+    });
     metrics.requestsTotal += 1;
     metrics.activeRequests += 1;
     const clientController = new AbortController();
@@ -555,6 +559,7 @@ export function createProtocolProxyRuntime({
         requestId,
         bufferBudget: budget,
         clientSignal: clientController.signal,
+        behaviorGuardsEnabled: route.behaviorGuardsEnabled !== false,
       };
 
       const finalizeRouteAttempt = (attempt, attemptNumber, phase) => {
@@ -585,7 +590,7 @@ export function createProtocolProxyRuntime({
         toolPassthrough: createToolPassthrough(1, 'initial'),
       });
       attempt = finalizeRouteAttempt(attempt, 1, 'initial');
-      if (attempt.kind === 'success' && route.validateAttempt) {
+      if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateAttempt) {
         const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody, config });
         if (!semanticValidation.ok) {
           recordActionlessCompletion(semanticValidation, 1, false);
@@ -611,7 +616,7 @@ export function createProtocolProxyRuntime({
         return;
       }
 
-      if (attempt.kind !== 'success' && attempt.kind !== 'tool_passthrough' && !attempt.deliveryCommitted && config.maxRecoveryAttempts > 0 && recoverable(attempt)) {
+      if (route.behaviorGuardsEnabled !== false && attempt.kind !== 'success' && attempt.kind !== 'tool_passthrough' && !attempt.deliveryCommitted && config.maxRecoveryAttempts > 0 && recoverable(attempt)) {
         metrics.recoveriesTotal += 1;
         requestLogger.info('recovery_started', {
           fromKind: attempt.kind,
@@ -650,7 +655,7 @@ export function createProtocolProxyRuntime({
           toolPassthrough: createToolPassthrough(2, 'recovery'),
         });
         attempt = finalizeRouteAttempt(attempt, 2, 'recovery');
-        if (attempt.kind === 'success' && route.validateAttempt) {
+        if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateAttempt) {
           const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody: recovery.body, config, recovery: true });
           if (!semanticValidation.ok) {
             recordActionlessCompletion(semanticValidation, 2, true);
@@ -666,7 +671,7 @@ export function createProtocolProxyRuntime({
             };
           }
         }
-        if (attempt.kind === 'success' && route.validateRecovery) {
+        if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateRecovery) {
           const recoveryValidation = route.validateRecovery(attempt, recovery);
           if (!recoveryValidation.ok) {
             recordActionlessCompletion(recoveryValidation, 2, recovery.plan?.mode === 'action_required');
@@ -791,7 +796,7 @@ export function createProtocolProxyRuntime({
           });
         }
         terminal('request_completed', {
-          mode: 'guarded',
+          mode: route.behaviorGuardsEnabled === false ? 'protocol_proxy' : 'guarded',
           status: attempt.status || 200,
           upstreamBytes: attempt.rawBody?.length || 0,
           toolCallCount: toolCalls.length,

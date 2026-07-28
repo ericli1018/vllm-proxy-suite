@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0 - 2026-07-28
+
+- Make Codex `/v1/responses` behavior-transparent by default with `RESPONSES_BEHAVIOR_MODE=transparent`.
+- Disable Responses Think Loop classification, `reasoning_without_output` rejection, Actionless Completion Recovery, forced-tool validation, and malformed required-tool automatic retry in transparent mode.
+- Preserve Chat↔Responses conversion, Hosted Tool filtering, Tool passthrough, protocol parsing, timeouts, request/body limits, buffer limits, and observability.
+- Keep the previous behavior available as an explicit A/B diagnostic mode with `RESPONSES_BEHAVIOR_MODE=guarded`.
+- Add request diagnostics for `responsesBehaviorMode` and `behaviorGuardsEnabled`.
+
 ## 0.5.9 - 2026-07-28
 
 - Added `RESPONSES_HOSTED_TOOL_POLICY` with `drop_optional` as the default for `chat_adapter`. Optional `web_search`, `web_search_preview`, file-search, Code Interpreter, Computer Use, and Image Generation declarations are removed while Client-executed function/custom/namespace tools continue upstream.

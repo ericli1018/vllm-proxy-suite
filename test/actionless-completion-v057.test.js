@@ -39,6 +39,7 @@ function config(overrides = {}) {
       LOG_LEVEL: 'debug',
     }),
     port: 0,
+    responsesBehaviorMode: 'guarded',
     ...overrides,
   });
 }

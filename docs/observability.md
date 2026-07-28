@@ -92,6 +92,20 @@ Anthropic:        block:<index>
 ```
 
 
+
+## Responses behavior mode diagnostics
+
+Every `/v1/responses` request reports:
+
+```text
+responsesBehaviorMode="transparent" | "guarded"
+behaviorGuardsEnabled=false | true
+```
+
+Default `transparent` mode does not emit `loop_detected`, `actionless_completion_detected`, `recovery_started`, or malformed required-tool retry events for Responses. A terminal model response is delivered as protocol output even when it contains only reasoning or only narration.
+
+`guarded` mode restores the earlier behavioral diagnostics and Recovery flow for controlled A/B testing. Transport limits, Hosted Tool filtering, Tool passthrough, parser errors, cancellation, and resource safety remain active in both modes.
+
 ## Responses upstream mode diagnostics
 
 Every guarded `/v1/responses` request includes the safe field:
@@ -126,9 +140,9 @@ response.completed
 
 This early item announcement preserves the same irreversible Tool boundary used by ordinary Function Calls.
 
-## Responses Think Loop action boundary
+## Guarded Responses Think Loop action boundary
 
-For `/v1/responses`, `loop_detected` is permitted only while the Attempt contains reasoning and no action or terminal marker. The guard closes when any visible output/refusal, Function Call, or response terminal event is observed.
+Only when `responsesBehaviorMode="guarded"`, `loop_detected` is permitted while the Attempt contains reasoning and no action or terminal marker. The guard closes when any visible output/refusal, Function Call, or response terminal event is observed.
 
 A normal successful sequence may therefore contain repeated reasoning but must still end as:
 
@@ -168,7 +182,7 @@ request_completed mode=tool_passthrough
 
 Interpretation:
 
-- Before `tool_passthrough_started`, Thinking Loop detection, semantic-stall detection, buffer limits, and Recovery remain active.
+- Before `tool_passthrough_started`, semantic-stall detection and buffer limits remain active. Thinking Loop detection and Recovery are additionally active only in `responsesBehaviorMode="guarded"` (and remain active for runtimes that explicitly use them).
 - `tool_passthrough_started` is the irreversible boundary. The Proxy stops heartbeat output, flushes all buffered upstream bytes, releases the raw response buffer reservation, and forwards later bytes with backpressure.
 - After commit, Tool JSON validation is observe-only. The Proxy does not block, rewrite, repair, split, or recover the Tool Call.
 - `tool_passthrough_validation_warning action=observe_only` means the retained observation was sufficient to identify a malformed Tool Call, but delivery was not changed.

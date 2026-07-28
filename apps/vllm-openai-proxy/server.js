@@ -24,8 +24,17 @@ export function loadOpenAiConfig(env = process.env) {
     ...env,
     PROXY_API_KEY: env.VLLM_OPENAI_PROXY_API_KEY ?? env.PROXY_API_KEY,
   };
+  const responsesBehaviorMode = (() => {
+    const value = String(env.RESPONSES_BEHAVIOR_MODE ?? env.VLLM_PROXY_RESPONSES_BEHAVIOR_MODE ?? 'transparent').toLowerCase();
+    return ['transparent', 'guarded'].includes(value) ? value : 'transparent';
+  })();
+  const malformedToolRetryConfigured = parseBoolean(
+    env.RESPONSES_MALFORMED_TOOL_RETRY_ENABLED ?? env.VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RETRY_ENABLED,
+    true,
+  );
   return Object.freeze({
     ...loadCommonConfig(protocolEnv, { port: 3456 }),
+    responsesBehaviorMode,
     responsesUpstreamMode: (() => {
       const value = String(env.RESPONSES_UPSTREAM_MODE ?? env.VLLM_PROXY_RESPONSES_UPSTREAM_MODE ?? 'chat_adapter').toLowerCase();
       return ['native', 'chat_adapter'].includes(value) ? value : 'chat_adapter';
@@ -34,10 +43,7 @@ export function loadOpenAiConfig(env = process.env) {
       const value = String(env.RESPONSES_HOSTED_TOOL_POLICY ?? env.VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY ?? 'drop_optional').toLowerCase();
       return ['drop_optional', 'reject', 'native_only'].includes(value) ? value : 'drop_optional';
     })(),
-    responsesMalformedToolRetryEnabled: parseBoolean(
-      env.RESPONSES_MALFORMED_TOOL_RETRY_ENABLED ?? env.VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RETRY_ENABLED,
-      true,
-    ),
+    responsesMalformedToolRetryEnabled: responsesBehaviorMode === 'guarded' && malformedToolRetryConfigured,
     responsesMalformedToolRecoveryMinTokens: (() => {
       const value = Number.parseInt(String(env.RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS ?? env.VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS ?? '1024'), 10);
       return Number.isSafeInteger(value) && value > 0 ? value : 1024;
@@ -61,8 +67,10 @@ export function isOpenAiPassthroughPath(path) {
 }
 
 function createRoute(adapter, api, config, options = {}) {
+  const behaviorGuardsEnabled = api !== 'responses' || config.responsesBehaviorMode === 'guarded';
   return {
     adapter,
+    behaviorGuardsEnabled,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     transparentToolPassthrough: true,
     prepareRequest(body) {
@@ -84,6 +92,7 @@ function createRoute(adapter, api, config, options = {}) {
         ...summarizeOpenAiToolContext(body),
         ...(api === 'responses' ? {
           responsesUpstreamMode: config.responsesUpstreamMode,
+          responsesBehaviorMode: config.responsesBehaviorMode,
           responsesHostedToolPolicy: config.responsesHostedToolPolicy,
           ...(hosted || {}),
         } : {}),
@@ -133,7 +142,7 @@ function createRoute(adapter, api, config, options = {}) {
       };
     },
     validateAttempt(attempt, { firstBody, recovery = false }) {
-      if (api !== 'responses' || !config.actionlessCompletionGuardEnabled) return { ok: true };
+      if (api !== 'responses' || !behaviorGuardsEnabled || !config.actionlessCompletionGuardEnabled) return { ok: true };
       return detectActionlessCompletion({
         requestBody: firstBody,
         output: adapter.extractOutput(attempt.result),

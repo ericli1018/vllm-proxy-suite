@@ -213,18 +213,21 @@ test('Gateway rejects required web_search before upstream and records its counte
 test('OpenAI config defaults hosted-tool and malformed-tool policies and accepts public overrides', () => {
   const defaults = loadOpenAiConfig(env());
   assert.equal(defaults.responsesHostedToolPolicy, 'drop_optional');
-  assert.equal(defaults.responsesMalformedToolRetryEnabled, true);
+  assert.equal(defaults.responsesBehaviorMode, 'transparent');
+  assert.equal(defaults.responsesMalformedToolRetryEnabled, false);
   assert.equal(defaults.responsesMalformedToolRecoveryMinTokens, 1024);
   assert.equal(defaults.responsesMalformedToolRecoveryTemperatureMax, 0.1);
   const overridden = loadOpenAiConfig(env({
     RESPONSES_HOSTED_TOOL_POLICY: undefined,
     VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY: 'reject',
-    VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RETRY_ENABLED: 'false',
+    VLLM_PROXY_RESPONSES_BEHAVIOR_MODE: 'guarded',
+    VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RETRY_ENABLED: 'true',
     VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS: '2048',
     VLLM_PROXY_RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX: '0.05',
   }));
   assert.equal(overridden.responsesHostedToolPolicy, 'reject');
-  assert.equal(overridden.responsesMalformedToolRetryEnabled, false);
+  assert.equal(overridden.responsesBehaviorMode, 'guarded');
+  assert.equal(overridden.responsesMalformedToolRetryEnabled, true);
   assert.equal(overridden.responsesMalformedToolRecoveryMinTokens, 2048);
   assert.equal(overridden.responsesMalformedToolRecoveryTemperatureMax, 0.05);
 });

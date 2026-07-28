@@ -465,7 +465,7 @@ test('Gateway chat_adapter preserves Actionless Recovery and forces the second C
     ].join(''));
   });
   const upstreamUrl = await listen(upstream);
-  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl }));
+  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl, RESPONSES_BEHAVIOR_MODE: 'guarded' }));
   const runtime = createOpenAiProxyRuntime({ config, exposeControlRoutes: false });
   const proxy = http.createServer(runtime.handle);
   const proxyUrl = await listen(proxy);
@@ -530,7 +530,7 @@ test('Gateway chat_adapter exposes additional_tools to Actionless Recovery', asy
     res.end('data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec","arguments":"{}"}}]},"finish_reason":null}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n');
   });
   const upstreamUrl = await listen(upstream);
-  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl }));
+  const config = loadOpenAiConfig(env({ VLLM_BASE_URL: upstreamUrl, RESPONSES_BEHAVIOR_MODE: 'guarded' }));
   const runtime = createOpenAiProxyRuntime({ config, exposeControlRoutes: false });
   const proxy = http.createServer(runtime.handle);
   const proxyUrl = await listen(proxy);

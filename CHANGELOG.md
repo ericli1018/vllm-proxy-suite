@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 - 2026-07-31
+
+- Added an opt-in Claude Code Managed WebFetch bridge for exactly one `WebFetch` Tool Call.
+- Added SSRF-safe HTTP/HTTPS downloading with DNS validation on every redirect, private/link-local/metadata rejection, content-type allowlisting, and bounded response reads.
+- Added HTML/plain-text extraction and structural chunking.
+- Added PDF extraction through `pdftotext -layout`, page preservation, page grouping, page-count limits, and container `poppler-utils` installation.
+- Added sequential no-thinking vLLM Chunk Reader calls and a no-thinking Document Synthesizer; only bounded evidence and summary are returned to the main model.
+- Added `think:false` plus `chat_template_kwargs.enable_thinking=false` to Managed WebSearch continuations, WebFetch readers, synthesis, and continuations.
+- Added internal recovery for missing `WebFetch.url` or `WebFetch.prompt`, preventing invalid `{}` calls from reaching Claude Code.
+- Added WebFetch execution, failure, limit, and chunk metrics and lifecycle logs.
+- Added Compose and runtime controls for WebFetch download, extraction, chunk, page, model, and result limits.
+- Preserved mixed/parallel client Tool responses unchanged and retained the existing WebSearch compatibility export.
+
 ## 0.6.3 - 2026-07-31
 
 - Completed `docker-compose.partial.yaml` for Managed WebSearch: added an opt-in `searxng` service under the `websearch` profile.

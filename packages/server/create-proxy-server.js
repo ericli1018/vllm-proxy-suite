@@ -52,6 +52,10 @@ function createMetrics() {
     managedWebSearchExecutionsTotal: 0,
     managedWebSearchFailuresTotal: 0,
     managedWebSearchLimitsTotal: 0,
+    managedWebFetchExecutionsTotal: 0,
+    managedWebFetchFailuresTotal: 0,
+    managedWebFetchLimitsTotal: 0,
+    managedWebFetchChunksTotal: 0,
   };
 }
 

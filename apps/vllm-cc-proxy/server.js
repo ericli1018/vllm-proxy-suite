@@ -8,7 +8,7 @@ import {
   validateClaudeCodeToolRecovery,
 } from '../../packages/anthropic/claude-code-tools/recovery.js';
 import { createProtocolProxyRuntime } from '../../packages/server/create-proxy-server.js';
-import { createAnthropicManagedWebSearchFetch } from '../../packages/anthropic/managed-websearch.js';
+import { createAnthropicManagedWebToolsFetch } from '../../packages/anthropic/managed-web-tools.js';
 
 function positiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -36,6 +36,9 @@ export function loadAnthropicConfig(env = process.env) {
     claudeCodeBashInvalidatesReads: parseBoolean(env.CLAUDE_CODE_BASH_INVALIDATES_READS, true),
     managedWebSearchEnabled: parseBoolean(env.CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED, false),
     managedWebSearchToolNames: parseCsv(env.CLAUDE_CODE_WEBSEARCH_TOOL_NAMES || 'WebSearch'),
+    managedWebFetchEnabled: parseBoolean(env.CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED, false),
+    managedWebFetchToolNames: parseCsv(env.CLAUDE_CODE_WEBFETCH_TOOL_NAMES || 'WebFetch'),
+    managedWebToolsThink: parseBoolean(env.MANAGED_WEB_TOOLS_THINK, false),
     searxngBaseUrl: trimTrailingSlash(env.SEARXNG_BASE_URL || ''),
     searxngApiKey: env.SEARXNG_API_KEY || '',
     searxngTimeoutMs: positiveInteger(env.SEARXNG_TIMEOUT_MS, 10000),
@@ -49,6 +52,24 @@ export function loadAnthropicConfig(env = process.env) {
     searxngLanguage: env.SEARXNG_LANGUAGE || 'all',
     searxngCategories: parseCsv(env.SEARXNG_CATEGORIES || 'general'),
     searxngSafeSearch: boundedInteger(env.SEARXNG_SAFE_SEARCH, 0, 0, 2),
+    webFetchTimeoutMs: positiveInteger(env.WEBFETCH_TIMEOUT_MS, 20000),
+    webFetchMaxUses: positiveInteger(env.WEBFETCH_MAX_USES, 3),
+    webFetchMaxRedirects: boundedInteger(env.WEBFETCH_MAX_REDIRECTS, 5, 0, 20),
+    webFetchMaxDownloadBytes: positiveInteger(env.WEBFETCH_MAX_DOWNLOAD_BYTES, 20971520),
+    webFetchMaxExtractedChars: positiveInteger(env.WEBFETCH_MAX_EXTRACTED_CHARS, 2000000),
+    webFetchMaxPromptChars: positiveInteger(env.WEBFETCH_MAX_PROMPT_CHARS, 4000),
+    webFetchReaderChunkChars: positiveInteger(env.WEBFETCH_READER_CHUNK_CHARS, 18000),
+    webFetchReaderChunkOverlapChars: positiveInteger(env.WEBFETCH_READER_CHUNK_OVERLAP_CHARS, 600),
+    webFetchReaderMaxChunks: positiveInteger(env.WEBFETCH_READER_MAX_CHUNKS, 32),
+    webFetchPdfPagesPerChunk: positiveInteger(env.WEBFETCH_PDF_PAGES_PER_CHUNK, 1),
+    webFetchPdfMaxPages: positiveInteger(env.WEBFETCH_PDF_MAX_PAGES, 100),
+    webFetchPdfExtractTimeoutMs: positiveInteger(env.WEBFETCH_PDF_EXTRACT_TIMEOUT_MS, 30000),
+    webFetchReaderMaxTokens: positiveInteger(env.WEBFETCH_READER_MAX_TOKENS, 800),
+    webFetchSynthesisMaxTokens: positiveInteger(env.WEBFETCH_SYNTHESIS_MAX_TOKENS, 1600),
+    webFetchSynthesisInputMaxChars: positiveInteger(env.WEBFETCH_SYNTHESIS_INPUT_MAX_CHARS, 200000),
+    webFetchResultMaxBytes: positiveInteger(env.WEBFETCH_RESULT_MAX_BYTES, 65536),
+    webFetchModelTimeoutMs: positiveInteger(env.WEBFETCH_MODEL_TIMEOUT_MS, 180000),
+    webFetchModelResponseMaxBytes: positiveInteger(env.WEBFETCH_MODEL_RESPONSE_MAX_BYTES, 1048576),
   });
 }
 
@@ -88,24 +109,37 @@ export function createAnthropicGuardedRoute(config, options = {}) {
       const uses = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-websearch-uses') || '0', 10) || 0;
       const failures = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-websearch-failures') || '0', 10) || 0;
       const limitReached = attempt?.headers?.get?.('x-vllm-proxy-managed-websearch-limit-reached') === 'true';
-      if (uses <= 0 && failures <= 0 && !limitReached) return;
-      metrics.managedWebSearchExecutionsTotal += uses;
-      metrics.managedWebSearchFailuresTotal += failures;
-      if (limitReached) metrics.managedWebSearchLimitsTotal += 1;
-      logger.info('managed_websearch_completed', {
-        attempt: attemptNumber,
-        phase,
-        uses,
-        failures,
-        limitReached,
-      });
+      const fetchUses = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-uses') || '0', 10) || 0;
+      const fetchFailures = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-failures') || '0', 10) || 0;
+      const fetchLimitReached = attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-limit-reached') === 'true';
+      const fetchChunks = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-chunks') || '0', 10) || 0;
+      if (uses > 0 || failures > 0 || limitReached) {
+        metrics.managedWebSearchExecutionsTotal += uses;
+        metrics.managedWebSearchFailuresTotal += failures;
+        if (limitReached) metrics.managedWebSearchLimitsTotal += 1;
+        logger.info('managed_websearch_completed', { attempt: attemptNumber, phase, uses, failures, limitReached });
+      }
+      if (fetchUses > 0 || fetchFailures > 0 || fetchLimitReached) {
+        metrics.managedWebFetchExecutionsTotal += fetchUses;
+        metrics.managedWebFetchFailuresTotal += fetchFailures;
+        metrics.managedWebFetchChunksTotal += fetchChunks;
+        if (fetchLimitReached) metrics.managedWebFetchLimitsTotal += 1;
+        logger.info('managed_webfetch_completed', {
+          attempt: attemptNumber,
+          phase,
+          uses: fetchUses,
+          failures: fetchFailures,
+          chunks: fetchChunks,
+          limitReached: fetchLimitReached,
+        });
+      }
     },
   };
 }
 
 function anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true }) {
-  const managedFetchImpl = config.managedWebSearchEnabled
-    ? createAnthropicManagedWebSearchFetch(fetchImpl, config)
+  const managedFetchImpl = (config.managedWebSearchEnabled || config.managedWebFetchEnabled)
+    ? createAnthropicManagedWebToolsFetch(fetchImpl, config)
     : null;
   return {
     name: 'vllm-cc-proxy',

@@ -30,7 +30,16 @@ Think Loop detection remains heuristic before an action boundary. The default re
 ## Managed WebSearch limitations
 
 - The SearXNG bridge is disabled by default and requires an externally reachable SearXNG instance with JSON output enabled.
-- v0.6.2 intercepts only exactly one configured WebSearch Tool Call. Mixed or parallel Tool Calls are delivered unchanged to Claude Code.
+- v0.7.0 intercepts only exactly one configured managed WebSearch or WebFetch Tool Call. Mixed or parallel Tool Calls are delivered unchanged to Claude Code.
 - Search results are snippets and links, not fetched source documents. WebFetch, PDF extraction, native Anthropic citations, encrypted server-tool state, and hosted-search usage accounting are not implemented.
 - Allowed and blocked domains are enforced by filtering returned result hostnames; they are not a transport-level guarantee that SearXNG queried only those domains.
 - The bridge buffers each vLLM sub-response and performs an internal continuation, increasing latency and context usage.
+
+## Managed WebFetch
+
+- HTML extraction is static and does not execute JavaScript.
+- Authenticated, CAPTCHA-protected, browser-only, and dynamically rendered pages may return incomplete content.
+- PDF extraction requires `pdftotext` from `poppler-utils`.
+- Managed Web Tool activity is internal to the Proxy and is not rendered as a Claude Code Tool row.
+- The implementation returns its own bounded evidence schema and does not emulate Anthropic hosted-tool encrypted content or native citations.
+- URL hostnames are resolved and checked before each request/redirect, but the current fetch transport does not pin the validated IP; environments requiring DNS-rebinding resistance should place the Proxy behind an egress firewall or outbound HTTP proxy.

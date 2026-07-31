@@ -552,3 +552,19 @@ vllm_cc_proxy_managed_web_search_executions_total
 vllm_cc_proxy_managed_web_search_failures_total
 vllm_cc_proxy_managed_web_search_limits_total
 ```
+
+## Managed Web Tools
+
+Managed WebSearch emits `managed_websearch_completed`. Managed WebFetch emits `managed_webfetch_completed` with `uses`, `failures`, `chunks`, and `limitReached`. Metrics:
+
+```text
+vllm_cc_proxy_managed_web_search_executions_total
+vllm_cc_proxy_managed_web_search_failures_total
+vllm_cc_proxy_managed_web_search_limits_total
+vllm_cc_proxy_managed_web_fetch_executions_total
+vllm_cc_proxy_managed_web_fetch_failures_total
+vllm_cc_proxy_managed_web_fetch_limits_total
+vllm_cc_proxy_managed_web_fetch_chunks_total
+```
+
+Managed tool calls are server-side internal operations, so Claude Code does not display `Search(...)` or `WebFetch(...)`. The final response or next ordinary Claude Code Tool Call is replayed after the internal loop completes.

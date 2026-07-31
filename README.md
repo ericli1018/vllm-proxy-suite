@@ -32,7 +32,7 @@ OpenAI SDK / OpenAI-compatible Client
 
 | Client Path | Runtime | 行為 |
 |---|---|---|
-| `POST /v1/messages` | Anthropic | Messages Guard、Claude Code Tool Recovery；可選 Managed WebSearch → SearXNG 內部 Tool Loop |
+| `POST /v1/messages` | Anthropic | Messages Guard、Claude Code Tool Recovery；可選 Managed WebSearch／WebFetch 內部 Tool Loop |
 | `/v1/messages/count_tokens` | Anthropic | 透明穿透 |
 | `POST /v1/chat/completions` | OpenAI | Pre-Tool Think Guard；Tool Call 透明直送 |
 | `POST /v1/responses` | OpenAI | 預設原生 Responses passthrough/validation；可選 Chat adapter；Function/Custom Tool 透明直送 |
@@ -70,7 +70,8 @@ VLLM-PROXY-SUITE/
 ├── packages/
 │   ├── core/
 │   ├── anthropic/
-│   │   ├── managed-websearch.js
+│   │   ├── managed-web-tools.js
+│   │   ├── managed-websearch.js  # 相容 re-export
 │   │   └── claude-code-tools/recovery.js
 │   ├── openai/
 │   └── server/
@@ -188,59 +189,78 @@ export ANTHROPIC_MODEL='your-vllm-served-model-name'
 
 Proxy 不改寫 `model`，名稱必須與 vLLM `--served-model-name` 一致。
 
-### Claude Code Managed WebSearch → SearXNG
+### Claude Code Managed WebSearch／WebFetch
 
-v0.6.2 提供 opt-in Managed Tool Bridge。當本地模型在 Anthropic Messages 回應中產生**唯一一個**名稱符合設定的 `WebSearch` Tool Call 時，Proxy 不把該 Tool Call交給 Claude Code，而是：
+v0.7.0 提供 opt-in Managed Web Tools Layer。只有 assistant response 中**正好一個**受管理工具時才攔截；混合或平行工具整份原樣交回 Claude Code。
 
 ```text
-vLLM tool_use: WebSearch
-→ Proxy 呼叫 SearXNG /search?format=json
-→ URL 去重、domain filter、結果與 bytes 限制
-→ 建立標準 user/tool_result
-→ 內部再次呼叫 vLLM
-→ 最終文字或 Bash/Read/Write 等普通 Tool 回 Claude Code
+WebSearch
+→ SearXNG JSON Search API
+→ 正規化 URL／snippet
+→ 標準 Anthropic tool_result
+→ 內部 vLLM continuation
+
+WebFetch(url, prompt)
+→ 每次 redirect 重新做 SSRF／DNS 驗證
+→ 有界下載 HTML／text／PDF
+→ HTML 依結構與字元預算分段
+→ PDF 使用 pdftotext 保留 page break，再依頁組分段
+→ 每段送至 vLLM Chunk Reader 擷取相關事實
+→ Document Synthesizer 合併證據
+→ 精簡 managed_webfetch_result 回灌主模型
+→ 內部 vLLM continuation
 ```
 
-啟用內建 SearXNG：
+Managed WebSearch continuation、WebFetch Chunk Reader、Document Synthesizer 與 WebFetch continuation 預設都注入：
+
+```json
+{
+  "think": false,
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  }
+}
+```
+
+外層 Claude Code request 不會被全域關閉 thinking；只有 Proxy 內部 Managed Web Tool requests 使用 no-thinking policy。
+
+啟用內建 SearXNG 與兩個 Bridge：
 
 ```bash
 export CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED=true
+export CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED=true
+export MANAGED_WEB_TOOLS_THINK=false
 export SEARXNG_SECRET='replace-with-a-long-random-secret'
+
 docker compose --profile websearch up -d searxng vllm-proxy-suite
 ```
 
-Gateway 預設連線：
+若只使用 WebFetch，不需要啟動 SearXNG：
 
-```env
-SEARXNG_BASE_URL=http://searxng:8080
+```bash
+export CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED=true
+docker compose up -d vllm-proxy-suite
 ```
 
-使用外部 SearXNG 時，不需啟動 `websearch` profile，只要覆寫 `SEARXNG_BASE_URL`。
+WebFetch 需要 `url` 與 `prompt`。模型若產生空 `{}` 或缺少欄位，Proxy 會在內部建立 `is_error:true` tool_result，讓模型自行重試或降級，不再把無效 WebFetch 交給 Claude Code。
 
-此 Compose 片段已提供 opt-in `searxng` service，與 Gateway 共用 `vllm-test-network`，並初始化允許 JSON Search format 的持久化設定。若你已有外部 SearXNG，可不啟用 profile，直接覆寫 `SEARXNG_BASE_URL`。
+支援內容：
 
-第一版只攔截 exactly one managed WebSearch Tool Call。若同一 response 同時包含 WebSearch 與 Bash／Read／其他工具，或同時包含多個 WebSearch，整個回應會原樣交給 Claude Code，不做部分執行，避免重複或改變平行工具語意。
+- `text/html`
+- `text/plain`
+- `application/pdf`
 
-Search 結果使用一般 Anthropic `tool_result` 回灌，不偽造 `server_tool_use`、`web_search_tool_result`、`encrypted_content`、Anthropic citations 或 WebFetch。Result 會加上 untrusted external data 標記；Proxy 不會遵從搜尋結果內的指令。
+Dockerfile 與 Compose runtime 會安裝 `poppler-utils`，PDF 由 `pdftotext -layout` 抽取並保留 form-feed page boundary。JavaScript-heavy、需要登入、CAPTCHA 或瀏覽器渲染的頁面不在第一版支援範圍。
 
-主要限制：
+安全限制包括：
 
-```env
-CLAUDE_CODE_WEBSEARCH_TOOL_NAMES=WebSearch
-SEARXNG_TIMEOUT_MS=10000
-SEARXNG_MAX_USES=5
-SEARXNG_MAX_RESULTS=8
-SEARXNG_MAX_RESULT_BYTES=16384
-SEARXNG_MAX_RESPONSE_BYTES=2097152
-SEARXNG_MAX_QUERY_CHARS=1024
-SEARXNG_MAX_TITLE_CHARS=300
-SEARXNG_MAX_SNIPPET_CHARS=600
-SEARXNG_LANGUAGE=all
-SEARXNG_CATEGORIES=general
-SEARXNG_SAFE_SEARCH=0
-```
+- 僅允許 HTTP／HTTPS。
+- 禁止 URL credentials。
+- 每次 redirect 都重新解析 DNS 並拒絕 loopback、RFC1918、link-local、metadata、ULA、multicast 與保留位址。
+- 限制 redirect、download bytes、extracted chars、PDF pages、reader chunks、model response 與最終 tool_result bytes。
+- 文件內容一律標記為 untrusted external data；Reader 不得執行頁面內指令。
+- 不偽造 Anthropic `server_tool_use`、`web_search_tool_result`、encrypted content 或 native citation blocks。
 
-`allowed_domains`／`blocked_domains` 若存在於 WebSearch input，會在 Proxy 端對 SearXNG 結果做 hostname 後置過濾。SearXNG 查詢失敗時，Proxy 會回灌 `is_error:true` 的 tool_result，讓模型決定降級、改用其他工具或回報限制。
 
 ## OpenAI SDK
 
@@ -638,7 +658,7 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 
 `LOOP_MIN_COUNT` 的 production 預設為 `3`；兩次自然重複不再直接構成 Think Loop。`TOOL_ARGUMENT_WARNING_BYTES` 與 `TOOL_ARGUMENT_CRITICAL_BYTES` 只發出診斷事件，不會截斷或改寫 Tool arguments。`MAX_TOOL_ARGUMENT_BYTES` 仍用於受保護的驗證路徑；OpenAI Tool Call 一旦 commit，任何大小或 JSON 狀態都只能 observe-only，不能撤銷已送出的 stream。`TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES` 只限制 Proxy 內部保留的 arguments 前綴，總 byte／fragment counters 仍精確。Client retry fingerprint 使用 path 與原始 request body 的精確 SHA-256；只辨識 byte-identical retry，不會對相似 prompt 做模糊比對。
 
-### Claude Code Managed WebSearch
+### Claude Code Managed WebSearch／WebFetch
 
 | 變數 | 預設 |
 |---|---:|
@@ -658,6 +678,27 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `SEARXNG_LANGUAGE` | `all` |
 | `SEARXNG_CATEGORIES` | `general` |
 | `SEARXNG_SAFE_SEARCH` | `0` |
+| `CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED` | `false` |
+| `CLAUDE_CODE_WEBFETCH_TOOL_NAMES` | `WebFetch` |
+| `MANAGED_WEB_TOOLS_THINK` | `false`；Managed Search/Fetch 內部 vLLM request 使用 `think:false` |
+| `WEBFETCH_TIMEOUT_MS` | `20000` |
+| `WEBFETCH_MAX_USES` | `3` |
+| `WEBFETCH_MAX_REDIRECTS` | `5` |
+| `WEBFETCH_MAX_DOWNLOAD_BYTES` | `20971520` |
+| `WEBFETCH_MAX_EXTRACTED_CHARS` | `2000000` |
+| `WEBFETCH_MAX_PROMPT_CHARS` | `4000` |
+| `WEBFETCH_READER_CHUNK_CHARS` | `18000` |
+| `WEBFETCH_READER_CHUNK_OVERLAP_CHARS` | `600` |
+| `WEBFETCH_READER_MAX_CHUNKS` | `32` |
+| `WEBFETCH_PDF_PAGES_PER_CHUNK` | `1`；預設逐頁讀取，可提高以降低呼叫次數 |
+| `WEBFETCH_PDF_MAX_PAGES` | `100` |
+| `WEBFETCH_PDF_EXTRACT_TIMEOUT_MS` | `30000` |
+| `WEBFETCH_READER_MAX_TOKENS` | `800` |
+| `WEBFETCH_SYNTHESIS_MAX_TOKENS` | `1600` |
+| `WEBFETCH_SYNTHESIS_INPUT_MAX_CHARS` | `200000` |
+| `WEBFETCH_RESULT_MAX_BYTES` | `65536` |
+| `WEBFETCH_MODEL_TIMEOUT_MS` | `180000` |
+| `WEBFETCH_MODEL_RESPONSE_MAX_BYTES` | `1048576` |
 
 ### Claude Code Recovery
 

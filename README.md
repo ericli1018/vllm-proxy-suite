@@ -19,11 +19,11 @@ OpenAI SDK / OpenAI-compatible Client
 - 共用 Loop Detector、Timeout、Cancellation 與最多一次 Recovery 控制。
 - Anthropic Messages 保持完整 Attempt 緩衝、驗證、Recovery 與原始 bytes 回放。
 - OpenAI Chat Completions／Responses 在第一個 Tool Call 前保持 Protected Streaming；第一個 Tool delta 出現後立即切換成透明直送。
-- `/v1/responses` 預設使用 `chat_adapter`：對外維持 Codex Responses protocol，內部轉成 vLLM `/v1/chat/completions`，再重建 Responses JSON／SSE；可選 Hosted Tool 會依 policy 安全降級，可切回 `native` 直接呼叫 vLLM Responses。
+- `/v1/responses` 預設使用 vLLM 原生 `native` 路徑；`chat_adapter` 保留為明確 fallback。
 - OpenAI Tool commit 後不阻擋、不修補、不拆分、不重寫 Tool arguments，也不再執行 Recovery；Proxy 只保留有界觀測與計數。
 - OpenAI 沒有 Tool Call 的回應仍保留上游原始 response bytes，通過驗證後回放。
 - OpenAI Responses 將 `completed`、`incomplete` 與 `failed` 視為協議終止狀態；terminal event、可見 output、refusal 或 Function Call 具有高於 Think Loop 的優先權，合法結果會原樣回放。`incomplete`（包含只有 reasoning 的 `max_output_tokens` 結果）以原始 HTTP 200／SSE bytes 回放，不改寫成 Proxy 錯誤。
-- OpenAI Responses 若在工具可用時只以第一人稱承諾「接下來要執行」，卻以 `response.completed` 結束且沒有 Function Call，會觸發一次 Actionless Completion Recovery；Recovery 強制 `tool_choice="required"` 與非平行單一工具。第二次仍無工具則 fail closed，且 `retryable=false`。
+- OpenAI Responses 行為 Guard 只在 `RESPONSES_BEHAVIOR_MODE=guarded` 啟用；預設 `transparent` 不因短文字、reasoning-only 或未呼叫工具而自動 Recovery。
 - OpenAI Recovery 只在 Tool commit 前使用當次 request 真正提供的網路查詢或下載工具，不預設固定工具名稱。
 - OpenAI Chat 的 System Message 契約固定為最多一個且只能位於 `messages[0]`；Proxy 產生 Recovery 時會合併至該開頭訊息，Client 提供中途 System Message 則在進入 vLLM 前回傳明確 `400`。
 - Claude Code Tool Recovery 只載入 Anthropic runtime，不會影響 OpenAI API。
@@ -32,10 +32,10 @@ OpenAI SDK / OpenAI-compatible Client
 
 | Client Path | Runtime | 行為 |
 |---|---|---|
-| `POST /v1/messages` | Anthropic | Messages Guard、Loop Recovery、Claude Code Tool Recovery |
+| `POST /v1/messages` | Anthropic | Messages Guard、Claude Code Tool Recovery；可選 Managed WebSearch → SearXNG 內部 Tool Loop |
 | `/v1/messages/count_tokens` | Anthropic | 透明穿透 |
 | `POST /v1/chat/completions` | OpenAI | Pre-Tool Think Guard；Tool Call 透明直送 |
-| `POST /v1/responses` | OpenAI | Responses façade；預設轉 Chat upstream；Pre-Tool Think Guard；Function/Custom Tool 透明直送 |
+| `POST /v1/responses` | OpenAI | 預設原生 Responses passthrough/validation；可選 Chat adapter；Function/Custom Tool 透明直送 |
 | 其他 `/v1/*` | OpenAI | 透明穿透 |
 | 其他路徑 | Gateway | `404` |
 
@@ -70,6 +70,7 @@ VLLM-PROXY-SUITE/
 ├── packages/
 │   ├── core/
 │   ├── anthropic/
+│   │   ├── managed-websearch.js
 │   │   └── claude-code-tools/recovery.js
 │   ├── openai/
 │   └── server/
@@ -105,12 +106,20 @@ Anthropic 與 OpenAI 僅作為 in-process runtime 模組，不提供獨立對外
 
 ## Docker Compose 部署
 
-`docker-compose.partial.yaml` 用於合併至既有 Compose。它只新增一個 service 與一個 named volume：
+`docker-compose.partial.yaml` 用於合併至既有 Compose。它提供 Gateway，以及由 `websearch` profile 控制的 SearXNG backend：
 
 ```text
-service: vllm-proxy-suite
-volume:  vllm-proxy-suite
+services:
+  vllm-proxy-suite
+  searxng            # profile: websearch
+
+volumes:
+  vllm-proxy-suite
+  searxng-config
+  searxng-data
 ```
+
+SearXNG 不發布 host port，只加入既有 `vllm-test-network`。首次啟動會在持久化設定 volume 建立最小 `settings.yml`，沿用預設 engines 並開啟 `html` 與 `json` Search formats。
 
 Container 啟動時會初始化或更新：
 
@@ -178,6 +187,60 @@ export ANTHROPIC_MODEL='your-vllm-served-model-name'
 ```
 
 Proxy 不改寫 `model`，名稱必須與 vLLM `--served-model-name` 一致。
+
+### Claude Code Managed WebSearch → SearXNG
+
+v0.6.2 提供 opt-in Managed Tool Bridge。當本地模型在 Anthropic Messages 回應中產生**唯一一個**名稱符合設定的 `WebSearch` Tool Call 時，Proxy 不把該 Tool Call交給 Claude Code，而是：
+
+```text
+vLLM tool_use: WebSearch
+→ Proxy 呼叫 SearXNG /search?format=json
+→ URL 去重、domain filter、結果與 bytes 限制
+→ 建立標準 user/tool_result
+→ 內部再次呼叫 vLLM
+→ 最終文字或 Bash/Read/Write 等普通 Tool 回 Claude Code
+```
+
+啟用內建 SearXNG：
+
+```bash
+export CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED=true
+export SEARXNG_SECRET='replace-with-a-long-random-secret'
+docker compose --profile websearch up -d searxng vllm-proxy-suite
+```
+
+Gateway 預設連線：
+
+```env
+SEARXNG_BASE_URL=http://searxng:8080
+```
+
+使用外部 SearXNG 時，不需啟動 `websearch` profile，只要覆寫 `SEARXNG_BASE_URL`。
+
+此 Compose 片段已提供 opt-in `searxng` service，與 Gateway 共用 `vllm-test-network`，並初始化允許 JSON Search format 的持久化設定。若你已有外部 SearXNG，可不啟用 profile，直接覆寫 `SEARXNG_BASE_URL`。
+
+第一版只攔截 exactly one managed WebSearch Tool Call。若同一 response 同時包含 WebSearch 與 Bash／Read／其他工具，或同時包含多個 WebSearch，整個回應會原樣交給 Claude Code，不做部分執行，避免重複或改變平行工具語意。
+
+Search 結果使用一般 Anthropic `tool_result` 回灌，不偽造 `server_tool_use`、`web_search_tool_result`、`encrypted_content`、Anthropic citations 或 WebFetch。Result 會加上 untrusted external data 標記；Proxy 不會遵從搜尋結果內的指令。
+
+主要限制：
+
+```env
+CLAUDE_CODE_WEBSEARCH_TOOL_NAMES=WebSearch
+SEARXNG_TIMEOUT_MS=10000
+SEARXNG_MAX_USES=5
+SEARXNG_MAX_RESULTS=8
+SEARXNG_MAX_RESULT_BYTES=16384
+SEARXNG_MAX_RESPONSE_BYTES=2097152
+SEARXNG_MAX_QUERY_CHARS=1024
+SEARXNG_MAX_TITLE_CHARS=300
+SEARXNG_MAX_SNIPPET_CHARS=600
+SEARXNG_LANGUAGE=all
+SEARXNG_CATEGORIES=general
+SEARXNG_SAFE_SEARCH=0
+```
+
+`allowed_domains`／`blocked_domains` 若存在於 WebSearch input，會在 Proxy 端對 SearXNG 結果做 hostname 後置過濾。SearXNG 查詢失敗時，Proxy 會回灌 `is_error:true` 的 tool_result，讓模型決定降級、改用其他工具或回報限制。
 
 ## OpenAI SDK
 
@@ -575,6 +638,27 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 
 `LOOP_MIN_COUNT` 的 production 預設為 `3`；兩次自然重複不再直接構成 Think Loop。`TOOL_ARGUMENT_WARNING_BYTES` 與 `TOOL_ARGUMENT_CRITICAL_BYTES` 只發出診斷事件，不會截斷或改寫 Tool arguments。`MAX_TOOL_ARGUMENT_BYTES` 仍用於受保護的驗證路徑；OpenAI Tool Call 一旦 commit，任何大小或 JSON 狀態都只能 observe-only，不能撤銷已送出的 stream。`TOOL_PASSTHROUGH_OBSERVATION_MAX_BYTES` 只限制 Proxy 內部保留的 arguments 前綴，總 byte／fragment counters 仍精確。Client retry fingerprint 使用 path 與原始 request body 的精確 SHA-256；只辨識 byte-identical retry，不會對相似 prompt 做模糊比對。
 
+### Claude Code Managed WebSearch
+
+| 變數 | 預設 |
+|---|---:|
+| `CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED` | `false` |
+| `CLAUDE_CODE_WEBSEARCH_TOOL_NAMES` | `WebSearch` |
+| `SEARXNG_VERSION` | `latest`；只供 Compose `websearch` profile 的內建 service 使用 |
+| `SEARXNG_SECRET` | 空；內建 service 首次建立設定時自動產生並持久化，正式環境可自行指定 |
+| `SEARXNG_BASE_URL` | Runtime 預設空；Compose 內建 service 使用 `http://searxng:8080` |
+| `SEARXNG_TIMEOUT_MS` | `10000` |
+| `SEARXNG_MAX_USES` | `5` |
+| `SEARXNG_MAX_RESULTS` | `8` |
+| `SEARXNG_MAX_RESULT_BYTES` | `16384` |
+| `SEARXNG_MAX_RESPONSE_BYTES` | `2097152` |
+| `SEARXNG_MAX_QUERY_CHARS` | `1024` |
+| `SEARXNG_MAX_TITLE_CHARS` | `300` |
+| `SEARXNG_MAX_SNIPPET_CHARS` | `600` |
+| `SEARXNG_LANGUAGE` | `all` |
+| `SEARXNG_CATEGORIES` | `general` |
+| `SEARXNG_SAFE_SEARCH` | `0` |
+
 ### Claude Code Recovery
 
 | 變數 | 預設 |
@@ -621,7 +705,7 @@ npm run check
 - `native` 模式下，`/v1/responses` 未辨識的新事件會保留在原始 SSE bytes，但不一定計入語意進度。
 - `chat_adapter` 是明確的 Text/Image + Client Tool 相容層，不等同完整 OpenAI hosted Responses runtime；不支援項目會在 upstream 前回傳 400。
 - 詳細限制見 `docs/known-limitations.md`。
-- 尚未在本環境完成真實 Claude Code／Hermes／OpenAI SDK → Gateway → vLLM 整合。
+- 尚未在本環境完成真實 Claude Code → Gateway → vLLM → SearXNG 整合；測試使用 deterministic mock upstream。
 
 ## 安全與部署
 

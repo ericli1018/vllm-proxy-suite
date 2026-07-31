@@ -1,5 +1,7 @@
 volumes:
   vllm-proxy-suite:
+  searxng-config:
+  searxng-data:
 
 services:
   vllm-proxy-suite:
@@ -43,6 +45,22 @@ services:
       CLAUDE_CODE_WRITE_RECOVERY_ENABLED: "${CLAUDE_CODE_WRITE_RECOVERY_ENABLED:-true}"
       CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED: "${CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED:-true}"
       CLAUDE_CODE_BASH_INVALIDATES_READS: "${CLAUDE_CODE_BASH_INVALIDATES_READS:-true}"
+
+      CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED: "${CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED:-false}"
+      CLAUDE_CODE_WEBSEARCH_TOOL_NAMES: "${CLAUDE_CODE_WEBSEARCH_TOOL_NAMES:-WebSearch}"
+      SEARXNG_BASE_URL: "${SEARXNG_BASE_URL:-http://searxng:8080}"
+      SEARXNG_API_KEY: "${SEARXNG_API_KEY:-}"
+      SEARXNG_TIMEOUT_MS: "${SEARXNG_TIMEOUT_MS:-10000}"
+      SEARXNG_MAX_USES: "${SEARXNG_MAX_USES:-5}"
+      SEARXNG_MAX_RESULTS: "${SEARXNG_MAX_RESULTS:-8}"
+      SEARXNG_MAX_RESULT_BYTES: "${SEARXNG_MAX_RESULT_BYTES:-16384}"
+      SEARXNG_MAX_RESPONSE_BYTES: "${SEARXNG_MAX_RESPONSE_BYTES:-2097152}"
+      SEARXNG_MAX_SNIPPET_CHARS: "${SEARXNG_MAX_SNIPPET_CHARS:-600}"
+      SEARXNG_MAX_TITLE_CHARS: "${SEARXNG_MAX_TITLE_CHARS:-300}"
+      SEARXNG_MAX_QUERY_CHARS: "${SEARXNG_MAX_QUERY_CHARS:-1024}"
+      SEARXNG_LANGUAGE: "${SEARXNG_LANGUAGE:-all}"
+      SEARXNG_CATEGORIES: "${SEARXNG_CATEGORIES:-general}"
+      SEARXNG_SAFE_SEARCH: "${SEARXNG_SAFE_SEARCH:-0}"
 
       HEARTBEAT_INTERVAL_MS: "10000"
       UPSTREAM_IDLE_TIMEOUT_MS: "180000"
@@ -122,3 +140,52 @@ services:
         hard: 262144
     networks:
       - vllm-test-network
+
+  searxng:
+    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}
+    container_name: searxng
+    profiles:
+      - websearch
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      SEARXNG_BIND_ADDRESS: "0.0.0.0"
+      SEARXNG_PORT: "8080"
+      SEARXNG_SECRET: "${SEARXNG_SECRET:-}"
+      SEARXNG_LIMITER: "false"
+      SEARXNG_IMAGE_PROXY: "false"
+      FORCE_OWNERSHIP: "true"
+    volumes:
+      - searxng-config:/etc/searxng
+      - searxng-data:/var/cache/searxng
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+          if [ ! -s /etc/searxng/settings.yml ]; then
+            secret_yaml="$$(python -c 'import json, os, secrets; print(json.dumps(os.environ.get("SEARXNG_SECRET") or secrets.token_urlsafe(48)))')"
+            printf '%s\n' \
+              'use_default_settings: true' \
+              'search:' \
+              '  formats:' \
+              '    - html' \
+              '    - json' \
+              'server:' \
+              "  secret_key: $$secret_yaml" \
+              '  limiter: false' \
+              '  image_proxy: false' \
+              > /etc/searxng/settings.yml
+          fi
+          exec /usr/local/searxng/entrypoint.sh
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=5).read(1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - vllm-test-network
+

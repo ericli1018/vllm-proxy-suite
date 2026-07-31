@@ -4,11 +4,14 @@ import { readFile } from 'node:fs/promises';
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('JavaScript gateway is the only deployed listener and Nginx is absent', async () => {
+test('JavaScript gateway is the only published listener and Nginx is absent', async () => {
   const compose = await read('docker-compose.partial.yaml');
   assert.match(compose, /^  vllm-proxy-suite:/m);
   const services = compose.split(/^services:\s*$/m)[1] || '';
-  assert.equal((services.match(/^  [a-zA-Z0-9_-]+:/gm) || []).length, 1);
+  assert.deepEqual(
+    (services.match(/^  [a-zA-Z0-9_-]+:/gm) || []).map((line) => line.trim().slice(0, -1)),
+    ['vllm-proxy-suite', 'searxng'],
+  );
   assert.equal((compose.match(/ports:/g) || []).length, 1);
   assert.match(compose, /- "3456:3456"/);
   assert.doesNotMatch(compose, /nginx/i);
@@ -29,7 +32,7 @@ test('Compose synchronizes the requested GitHub repository into the named volume
   assert.doesNotMatch(compose, /git -C \/app pull/);
 });
 
-test('Compose exposes both protocol-specific API keys on the single service', async () => {
+test('Compose exposes both protocol-specific API keys on the gateway service', async () => {
   const compose = await read('docker-compose.partial.yaml');
   for (const name of [
     'VLLM_CC_PROXY_API_KEY',
@@ -50,4 +53,27 @@ test('Dockerfile starts the JavaScript suite gateway as non-root', async () => {
   assert.match(dockerfile, /USER node/);
   assert.match(dockerfile, /vllm-proxy-suite\.js/);
   assert.doesNotMatch(dockerfile, /nginx/i);
+});
+
+test('Compose provides an opt-in SearXNG backend for the managed WebSearch bridge', async () => {
+  const compose = await read('docker-compose.partial.yaml');
+  assert.match(compose, /^  searxng:$/m);
+  assert.match(compose, /image: docker\.io\/searxng\/searxng:\$\{SEARXNG_VERSION:-latest\}/);
+  assert.match(compose, /profiles:\s*\n\s*- websearch/);
+  assert.match(compose, /searxng-config:\/etc\/searxng/);
+  assert.match(compose, /searxng-data:\/var\/cache\/searxng/);
+  assert.match(compose, /use_default_settings: true/);
+  assert.match(compose, /'  formats:'/);
+  assert.match(compose, /'    - html'/);
+  assert.match(compose, /'    - json'/);
+  assert.match(compose, /SEARXNG_SECRET: "\$\{SEARXNG_SECRET:-\}"/);
+  assert.match(compose, /secrets\.token_urlsafe\(48\)/);
+  assert.match(compose, /secret_key:/);
+  assert.match(compose, /\/usr\/local\/searxng\/entrypoint\.sh/);
+  assert.match(compose, /http:\/\/127\.0\.0\.1:8080\//);
+  assert.match(compose, /SEARXNG_BASE_URL: "\$\{SEARXNG_BASE_URL:-http:\/\/searxng:8080\}"/);
+
+  const searxngService = compose.split(/^  searxng:$/m)[1] || '';
+  assert.doesNotMatch(searxngService, /^    ports:/m);
+  assert.match(searxngService, /^    networks:\s*\n\s*- vllm-test-network/m);
 });

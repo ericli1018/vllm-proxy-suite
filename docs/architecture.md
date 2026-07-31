@@ -139,3 +139,21 @@ The route-scoped fetch adapter sits below the existing attempt runner. The attem
 The adapter uses a request-local mapping table to flatten namespace tools for Chat upstreams and restore `(namespace, name)` in Responses function calls. Custom tools are represented upstream as strict wrapper functions with a single freeform `__arg1` string; the encoder restores native `custom_tool_call` items.
 
 There is no automatic native-to-chat fallback after an attempt starts. A deployment selects one mode per runtime to prevent duplicate inference or duplicate Tool side effects. The default is native because it preserves vLLM's Responses renderer, item lifecycle and model-specific tool context.
+
+## Managed WebSearch execution layer
+
+The Anthropic runtime can optionally wrap its vLLM fetch path with `packages/anthropic/managed-websearch.js`.
+
+```text
+Claude Code /v1/messages
+→ vLLM Anthropic Messages generation
+→ exactly one WebSearch tool_use
+→ SearXNG JSON Search API
+→ bounded untrusted tool_result
+→ internal Anthropic continuation
+→ final text or ordinary Claude Code tool_use
+```
+
+The bridge does not change the shared protocol runtime. Anthropic responses are already buffered before replay, so the bridge can hide the managed Tool Call without crossing an irreversible client-delivery boundary. Responses containing mixed tools, multiple Tool Calls, malformed tool input, unknown content blocks, or a non-`tool_use` stop reason are returned untouched.
+
+The continuation preserves supported thinking, text, and tool-use blocks and appends a matching `tool_result`. It does not emulate Anthropic Hosted Web Search, server tool lifecycle events, encrypted content, citations, or WebFetch.

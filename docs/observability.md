@@ -529,3 +529,26 @@ vllm_openai_proxy_required_hosted_tools_rejected_total
 vllm_openai_proxy_malformed_tool_retries_total
 vllm_openai_proxy_malformed_tool_retry_failures_total
 ```
+
+## Claude Code Managed WebSearch
+
+When the opt-in SearXNG bridge executes at least one managed search, the Anthropic runtime emits:
+
+```text
+event=managed_websearch_completed
+attempt=<attempt number>
+phase=initial|recovery
+uses=<executed WebSearch calls>
+failures=<SearXNG failures returned as error tool_result>
+limitReached=true|false
+```
+
+Queries, snippets, titles, URLs, tool arguments, and result payloads are not included in normal logs.
+
+Prometheus counters:
+
+```text
+vllm_cc_proxy_managed_web_search_executions_total
+vllm_cc_proxy_managed_web_search_failures_total
+vllm_cc_proxy_managed_web_search_limits_total
+```

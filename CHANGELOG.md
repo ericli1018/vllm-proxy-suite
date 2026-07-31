@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.3 - 2026-07-31
+
+- Completed `docker-compose.partial.yaml` for Managed WebSearch: added an opt-in `searxng` service under the `websearch` profile.
+- Added persistent `searxng-config` and `searxng-data` volumes and internal-only port exposure on `vllm-test-network`.
+- Added first-start SearXNG settings initialization with default engines plus JSON Search API format.
+- Added SearXNG readiness healthcheck and documented internal versus external SearXNG deployment.
+- Updated deployment and package validation contracts to require both Gateway and opt-in SearXNG services.
+
+## 0.6.2 - 2026-07-31
+
+- Added an opt-in Claude Code `WebSearch` managed-tool bridge backed by the SearXNG JSON Search API.
+- A single managed `WebSearch` call is hidden from Claude Code, executed by the Proxy, converted to a bounded untrusted `tool_result`, and continued internally through Anthropic Messages until the model returns text or a normal Claude Code tool.
+- Preserved thinking, text, and tool-use blocks in the continuation; unsupported or opaque Anthropic content blocks disable interception instead of being dropped.
+- Mixed or parallel Tool Calls remain untouched and are delivered to Claude Code; v0.6.2 intercepts only exactly one configured WebSearch call.
+- Added query, timeout, use-count, raw-response, normalized-result, result-count, title, and snippet limits; URL deduplication; tracking-parameter removal; and allowed/blocked-domain filtering.
+- Added SearXNG failure `tool_result` handling, use-limit continuation with WebSearch removal, stream/non-stream support, lifecycle logs, Prometheus counters, and end-to-end Gateway tests.
+- The bridge is disabled by default and does not emulate Anthropic Hosted Web Search, encrypted content, native citations, or WebFetch.
+
 ## 0.6.1 - 2026-07-28
 
 - Make vLLM native `/v1/responses` the default Codex upstream path; retain `chat_adapter` as an explicit A/B or compatibility fallback.

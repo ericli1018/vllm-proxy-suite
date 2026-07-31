@@ -49,6 +49,9 @@ function createMetrics() {
     malformedToolRetriesTotal: 0,
     malformedToolRetryFailuresTotal: 0,
     toolChoiceRewritesTotal: 0,
+    managedWebSearchExecutionsTotal: 0,
+    managedWebSearchFailuresTotal: 0,
+    managedWebSearchLimitsTotal: 0,
   };
 }
 

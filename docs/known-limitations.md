@@ -26,3 +26,11 @@
 ## Think Loop heuristic
 
 Think Loop detection remains heuristic before an action boundary. The default requires three repeated cycles, but unusual repetitive reasoning may still trigger Recovery before output, refusal, Function Call, or terminal response state appears. After an OpenAI action boundary, loop detection is disabled for that Attempt.
+
+## Managed WebSearch limitations
+
+- The SearXNG bridge is disabled by default and requires an externally reachable SearXNG instance with JSON output enabled.
+- v0.6.2 intercepts only exactly one configured WebSearch Tool Call. Mixed or parallel Tool Calls are delivered unchanged to Claude Code.
+- Search results are snippets and links, not fetched source documents. WebFetch, PDF extraction, native Anthropic citations, encrypted server-tool state, and hosted-search usage accounting are not implemented.
+- Allowed and blocked domains are enforced by filtering returned result hostnames; they are not a transport-level guarantee that SearXNG queried only those domains.
+- The bridge buffers each vLLM sub-response and performs an internal continuation, increasing latency and context usage.

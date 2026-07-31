@@ -23,6 +23,7 @@ const required = [
   'packages/core/sse.js',
   'packages/core/tool-correlation.js',
   'packages/anthropic/messages.js',
+  'packages/anthropic/managed-websearch.js',
   'packages/anthropic/claude-code-tools/recovery.js',
   'packages/openai/chat-completions.js',
   'packages/openai/actionless-completion.js',
@@ -41,6 +42,8 @@ const required = [
   'test/responses-malformed-tool-retry-v059.test.js',
   'test/responses-transparent-mode-v060.test.js',
   'test/responses-native-default-v061.test.js',
+  'test/anthropic-websearch-bridge-v062.test.js',
+  'test/anthropic-websearch-bridge-integration-v062.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -65,7 +68,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.6.1') errors.push('package.json version must be 0.6.1');
+if (packageJson.version !== '0.6.3') errors.push('package.json version must be 0.6.3');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -104,12 +107,21 @@ if (!compose.includes('${VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY:-drop_optional}
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RETRY_ENABLED')) errors.push('Compose must expose malformed required-tool retry switch');
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS')) errors.push('Compose must expose malformed-tool minimum token budget');
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX')) errors.push('Compose must expose malformed-tool recovery temperature cap');
+if (!compose.includes('CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED')) errors.push('Compose must expose the Claude Code WebSearch bridge switch');
+if (!compose.includes('SEARXNG_BASE_URL')) errors.push('Compose must expose the SearXNG base URL');
+if (!compose.includes('SEARXNG_MAX_USES')) errors.push('Compose must expose the SearXNG use limit');
+if (!compose.includes('SEARXNG_MAX_RESULT_BYTES')) errors.push('Compose must expose the SearXNG normalized result byte limit');
 
 const servicesPart = compose.split(/^services:\s*$/m)[1] || '';
 const serviceNames = [...servicesPart.matchAll(/^  ([a-zA-Z0-9_-]+):$/gm)].map((match) => match[1]);
-if (serviceNames.length !== 1 || serviceNames[0] !== 'vllm-proxy-suite') {
-  errors.push(`Compose must define exactly one service named vllm-proxy-suite; found: ${serviceNames.join(', ')}`);
+if (serviceNames.length !== 2 || serviceNames[0] !== 'vllm-proxy-suite' || serviceNames[1] !== 'searxng') {
+  errors.push(`Compose must define vllm-proxy-suite and opt-in searxng services; found: ${serviceNames.join(', ')}`);
 }
+if (!compose.includes('docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}')) errors.push('Compose must use the official SearXNG image');
+if (!compose.includes('- websearch')) errors.push('Compose must gate the SearXNG service behind the websearch profile');
+if (!compose.includes('searxng-config:/etc/searxng')) errors.push('Compose must persist SearXNG configuration');
+if (!compose.includes('searxng-data:/var/cache/searxng')) errors.push('Compose must persist SearXNG cache data');
+if (!compose.includes('- json')) errors.push('Compose must initialize SearXNG JSON search format');
 
 const dockerfile = readFileSync(resolve(root, 'Dockerfile'), 'utf8');
 if (!dockerfile.includes('CMD ["node", "/app/vllm-proxy-suite.js"]')) errors.push('Dockerfile must start the JavaScript Gateway');
@@ -121,6 +133,10 @@ for (const route of ["path === '/v1/messages'", "path === '/v1/messages/count_to
 }
 if (!gateway.includes('createAnthropicProxyRuntime')) errors.push('Gateway must load the Anthropic runtime in-process');
 if (!gateway.includes('createOpenAiProxyRuntime')) errors.push('Gateway must load the OpenAI runtime in-process');
+
+const anthropicRuntime = readFileSync(resolve(root, 'apps/vllm-cc-proxy/server.js'), 'utf8');
+if (!anthropicRuntime.includes('createAnthropicManagedWebSearchFetch')) errors.push('Anthropic runtime must support managed WebSearch');
+if (!anthropicRuntime.includes('managed_websearch_completed')) errors.push('Anthropic runtime must observe managed WebSearch lifecycle');
 
 const openAiRuntime = readFileSync(resolve(root, 'apps/vllm-openai-proxy/server.js'), 'utf8');
 if (!openAiRuntime.includes('transparentToolPassthrough: true')) errors.push('OpenAI guarded routes must enable transparent Tool passthrough');

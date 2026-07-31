@@ -160,9 +160,11 @@ TaskUpdate({"status":"completed"})
 → one Output-Required Recovery with original tool_choice
 ```
 
-The Recovery instruction explicitly forbids inventing missing identifiers and permits a state-read Tool such as `TaskList`, another complete Tool Call, substantive text, or one blocking question. It does not force the rejected Tool. A repeated schema-invalid Tool Call is fused with `retryable=false`.
+The Recovery instruction explicitly forbids inventing missing identifiers and permits a state-read Tool such as `TaskList`, another complete Tool Call, substantive text, or one blocking question. It does not force the rejected Tool when required information is missing. A repeated schema-invalid Tool Call is fused with `retryable=false`.
 
-`CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED=false` disables this universal pre-replay guard. Existing exact-target mutation Recovery remains independently controlled by `CLAUDE_CODE_TOOL_RECOVERY_ENABLED`.
+A narrower `schema_correction` mode is used only when exactly one property violates `additionalProperties:false` and deleting that property makes the complete input schema-valid. The Proxy then supplies only the rejected Tool, forces that exact Tool, uses a scoped Recovery context, and validates that every remaining argument value is byte-equivalent at the JSON semantic level. Multiple extra properties, missing required data, or any remaining validation error fall back to generic `auto` Recovery.
+
+`CLAUDE_CODE_TARGETED_SCHEMA_CORRECTION_ENABLED=false` disables only this targeted mode. `CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED=false` disables the universal pre-replay guard. Existing exact-target mutation Recovery remains independently controlled by `CLAUDE_CODE_TOOL_RECOVERY_ENABLED`.
 
 ## Claude Code Tool stop-reason normalization
 

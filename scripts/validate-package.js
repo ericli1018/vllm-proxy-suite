@@ -57,6 +57,7 @@ const required = [
   'test/anthropic-placeholder-completion-v076.test.js',
   'test/anthropic-tool-stop-reason-normalization-v078.test.js',
   'test/anthropic-tool-input-schema-guard-v079.test.js',
+  'test/anthropic-targeted-schema-correction-v0710.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -81,7 +82,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.9') errors.push('package.json version must be 0.7.9');
+if (packageJson.version !== '0.7.10') errors.push('package.json version must be 0.7.10');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -128,6 +129,7 @@ if (!compose.includes('RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX')) erro
 if (!compose.includes('CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED')) errors.push('Compose must expose the Claude Code Action-Intent guard switch');
 if (!compose.includes('CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED')) errors.push('Compose must expose the Claude Code placeholder-completion guard switch');
 if (!compose.includes('CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED')) errors.push('Compose must expose the Claude Code Tool input-schema guard switch');
+if (!compose.includes('CLAUDE_CODE_TARGETED_SCHEMA_CORRECTION_ENABLED')) errors.push('Compose must expose the targeted Tool input-schema correction switch');
 if (!compose.includes('CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED')) errors.push('Compose must expose the Claude Code Tool stop-reason normalization switch');
 if (!compose.includes('CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED')) errors.push('Compose must expose the Claude Code WebSearch bridge switch');
 if (!compose.includes('SEARXNG_BASE_URL')) errors.push('Compose must expose the SearXNG base URL');

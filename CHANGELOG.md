@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.10 - 2026-07-31
+
+- Added Targeted Tool Input Schema Correction for a single `additionalProperties:false` violation when removing that one unsupported property makes the original Tool input fully schema-valid.
+- Targeted correction narrows Recovery to the rejected Tool, sets `tool_choice={type:"tool",name:<tool>,disable_parallel_tool_use:true}`, and uses a scoped one-message context instead of resending the full conversation.
+- The Recovery must preserve every accepted argument value exactly and remove only the identified unsupported property; changing the Tool name, returning text, modifying other arguments, or remaining schema-invalid is fused as `invalid_tool_input_schema` with `retryable:false`.
+- Missing required identifiers, multiple unsupported properties, and any input that remains invalid after one removal continue to use the v0.7.9 generic `tool_choice:auto` Recovery.
+- Added `CLAUDE_CODE_TARGETED_SCHEMA_CORRECTION_ENABLED`, targeted lifecycle events and Prometheus counters, focused safety-boundary regressions, deployment validation, and documentation.
+
 ## 0.7.9 - 2026-07-31
 
 - Added a universal Anthropic Tool Input Schema Guard that validates every buffered Tool Call before replay, including task-management, MCP, and dynamically supplied Tools rather than only file mutation Tools.

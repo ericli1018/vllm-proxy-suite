@@ -194,6 +194,102 @@ function validateAgainstToolSchema(tool, input) {
   return validateSchemaValue(schema, input);
 }
 
+function collectUnsupportedPropertyPaths(schema, value, {
+  inputPath = '$',
+  pathSegments = [],
+  depth = 0,
+  results = [],
+} = {}) {
+  if (depth > 64 || !isPlainObject(schema)) return results;
+  if (isPlainObject(value)) {
+    const properties = isPlainObject(schema.properties) ? schema.properties : {};
+    const patternProperties = isPlainObject(schema.patternProperties) ? schema.patternProperties : {};
+    for (const [key, child] of Object.entries(value)) {
+      if (Object.hasOwn(properties, key)) {
+        collectUnsupportedPropertyPaths(properties[key], child, {
+          inputPath: `${inputPath}.${key}`,
+          pathSegments: [...pathSegments, key],
+          depth: depth + 1,
+          results,
+        });
+        continue;
+      }
+      const matchingSchemas = [];
+      for (const [pattern, childSchema] of Object.entries(patternProperties)) {
+        let regexp;
+        try { regexp = new RegExp(pattern, 'u'); } catch { continue; }
+        if (regexp.test(key)) matchingSchemas.push(childSchema);
+      }
+      if (matchingSchemas.length > 0) {
+        for (const childSchema of matchingSchemas) {
+          collectUnsupportedPropertyPaths(childSchema, child, {
+            inputPath: `${inputPath}.${key}`,
+            pathSegments: [...pathSegments, key],
+            depth: depth + 1,
+            results,
+          });
+        }
+        continue;
+      }
+      if (schema.additionalProperties === false) {
+        results.push({
+          inputPath: `${inputPath}.${key}`,
+          pathSegments: [...pathSegments, key],
+          propertyName: key,
+        });
+        continue;
+      }
+      if (isPlainObject(schema.additionalProperties)) {
+        collectUnsupportedPropertyPaths(schema.additionalProperties, child, {
+          inputPath: `${inputPath}.${key}`,
+          pathSegments: [...pathSegments, key],
+          depth: depth + 1,
+          results,
+        });
+      }
+    }
+  }
+  if (Array.isArray(value) && schema.items !== undefined) {
+    for (let index = 0; index < value.length; index += 1) {
+      collectUnsupportedPropertyPaths(schema.items, value[index], {
+        inputPath: `${inputPath}[${index}]`,
+        pathSegments: [...pathSegments, index],
+        depth: depth + 1,
+        results,
+      });
+    }
+  }
+  return results;
+}
+
+function removePath(value, pathSegments) {
+  const output = structuredClone(value);
+  let current = output;
+  for (let index = 0; index < pathSegments.length - 1; index += 1) {
+    current = current?.[pathSegments[index]];
+    if (current === undefined || current === null) return null;
+  }
+  const last = pathSegments[pathSegments.length - 1];
+  if (!isPlainObject(current) || typeof last !== 'string' || !Object.hasOwn(current, last)) return null;
+  delete current[last];
+  return output;
+}
+
+function buildSingleAdditionalPropertyCorrection(tool, input) {
+  if (!tool || !isPlainObject(input) || !isPlainObject(tool.input_schema)) return null;
+  const unsupported = collectUnsupportedPropertyPaths(tool.input_schema, input);
+  if (unsupported.length !== 1) return null;
+  const candidate = unsupported[0];
+  const expectedArguments = removePath(input, candidate.pathSegments);
+  if (!expectedArguments) return null;
+  const correctedValidation = validateAgainstToolSchema(tool, expectedArguments);
+  if (!correctedValidation.ok) return null;
+  return {
+    ...candidate,
+    expectedArguments,
+  };
+}
+
 export function validateExposedClaudeCodeToolCalls({ request, output }) {
   const calls = Array.isArray(output?.toolCalls) ? output.toolCalls : [];
   if (calls.length === 0) return { ok: true, toolCallCount: 0, toolNames: [] };
@@ -201,17 +297,30 @@ export function validateExposedClaudeCodeToolCalls({ request, output }) {
     const tool = toolByName(request, call?.name);
     const validation = validateAgainstToolSchema(tool, call?.parsedArguments);
     if (!validation.ok) {
+      const schemaCorrection = validation.diagnostics?.schemaKeyword === 'additionalProperties'
+        ? buildSingleAdditionalPropertyCorrection(tool, call?.parsedArguments)
+        : null;
       return {
         ...validation,
         reason: 'invalid_tool_input_schema',
         context: {
           toolName: call?.name || null,
           toolCallId: call?.id || null,
+          rejectedArguments: isPlainObject(call?.parsedArguments)
+            ? structuredClone(call.parsedArguments)
+            : null,
+          ...(schemaCorrection ? { schemaCorrection } : {}),
         },
         diagnostics: {
           ...(validation.diagnostics || {}),
           rejectedToolName: call?.name || null,
           rejectedToolCallId: call?.id || null,
+          targetedSchemaCorrectionAvailable: Boolean(schemaCorrection),
+          targetedSchemaCorrection: Boolean(schemaCorrection),
+          ...(schemaCorrection ? {
+            removedInputPath: schemaCorrection.inputPath,
+            removedPropertyName: schemaCorrection.propertyName,
+          } : {}),
         },
       };
     }
@@ -221,6 +330,20 @@ export function validateExposedClaudeCodeToolCalls({ request, output }) {
     toolCallCount: calls.length,
     toolNames: calls.map((call) => call.name),
   };
+}
+
+export function isTargetedToolInputSchemaCorrectionIssue(issue) {
+  return Boolean(
+    issue
+    && issue.ok === false
+    && issue.reason === 'invalid_tool_input_schema'
+    && issue.context?.toolName
+    && isPlainObject(issue.context?.rejectedArguments)
+    && issue.context?.schemaCorrection
+    && isPlainObject(issue.context.schemaCorrection.expectedArguments)
+    && issue.diagnostics?.schemaKeyword === 'additionalProperties'
+    && issue.diagnostics?.targetedSchemaCorrectionAvailable === true
+  );
 }
 
 function isMutationTool(name) {
@@ -437,6 +560,119 @@ export function buildClaudeCodeToolRecovery({ original, prepared = null, issue, 
   body.tool_choice = { type: 'tool', name: plan.toolName };
   body.system = appendSystem(body.system, toolInstruction(plan, issue));
   return { body, plan };
+}
+
+function schemaCorrectionInstruction(plan) {
+  return [
+    'Schema correction recovery. The previous generation was discarded and did not change task or tool state.',
+    `Re-emit exactly one ${plan.toolName} tool call and no final response text.`,
+    `Remove only the unsupported input property at ${plan.removedInputPath}.`,
+    'Preserve all other argument values exactly and do not add, infer, summarize, or rewrite any value.',
+    'Use the expected corrected arguments supplied below as the exact semantic payload.',
+    `Rejected arguments JSON: ${JSON.stringify(plan.rejectedArguments)}.`,
+    `Expected corrected arguments JSON: ${JSON.stringify(plan.expectedArguments)}.`,
+  ].join(' ');
+}
+
+export function buildClaudeCodeSchemaCorrectionRecovery({ original, prepared = null, issue, config }) {
+  if (!isTargetedToolInputSchemaCorrectionIssue(issue)) {
+    throw new TypeError('A targeted Tool Input Schema correction issue is required');
+  }
+  const selected = toolByName(original, issue.context.toolName);
+  if (!selected) throw new Error(`Recovery tool is not exposed: ${issue.context.toolName}`);
+
+  const body = structuredClone(prepared || original);
+  capRecoverySampling(body, config);
+  const plan = {
+    mode: 'schema_correction',
+    originReason: issue.reason,
+    toolName: issue.context.toolName,
+    rejectedToolCallId: issue.context.toolCallId || null,
+    rejectedArguments: structuredClone(issue.context.rejectedArguments),
+    expectedArguments: structuredClone(issue.context.schemaCorrection.expectedArguments),
+    removedInputPath: issue.context.schemaCorrection.inputPath,
+    removedPropertyName: issue.context.schemaCorrection.propertyName,
+    inputSchema: structuredClone(selected.input_schema || {}),
+  };
+
+  body.system = schemaCorrectionInstruction(plan);
+  body.messages = [{ role: 'user', content: 'Emit the corrected Tool Call now.' }];
+  body.tools = [structuredClone(selected)];
+  body.tool_choice = {
+    type: 'tool',
+    name: plan.toolName,
+    disable_parallel_tool_use: true,
+  };
+  return {
+    body,
+    plan,
+    diagnostics: {
+      recoveryInstructionPlacement: 'system',
+      recoveryContextMode: 'scoped',
+      recoveryMode: plan.mode,
+      recoveryOriginReason: plan.originReason,
+      recoveryToolCount: 1,
+      recoveryToolNames: [plan.toolName],
+      recoveryToolChoice: plan.toolName,
+      forcedToolChoice: true,
+      parallelToolCallsDisabled: true,
+      toolInputSchemaRecovery: true,
+      targetedSchemaCorrection: true,
+      rejectedToolName: plan.toolName,
+      removedInputPath: plan.removedInputPath,
+      removedPropertyName: plan.removedPropertyName,
+    },
+  };
+}
+
+function schemaCorrectionFailure(detail, plan, diagnostics = {}) {
+  return {
+    ok: false,
+    reason: 'invalid_tool_input_schema',
+    detail,
+    retryable: false,
+    diagnostics: {
+      toolInputSchemaRecoveryAttempted: true,
+      targetedSchemaCorrection: true,
+      rejectedToolName: plan?.toolName || null,
+      removedInputPath: plan?.removedInputPath || null,
+      ...diagnostics,
+    },
+  };
+}
+
+export function validateClaudeCodeSchemaCorrectionRecovery(output, plan) {
+  if (plan?.mode !== 'schema_correction') return { ok: true };
+  const selected = recoveryCall(output);
+  if (!selected.ok) return schemaCorrectionFailure(selected.reason, plan, { recoveryFailureReason: selected.reason });
+  const call = selected.call;
+  if (call.name !== plan.toolName) {
+    return schemaCorrectionFailure('The schema-correction Recovery changed the Tool name.', plan, {
+      recoveryFailureReason: 'forced_tool_name_mismatch',
+      actualToolName: call.name || null,
+    });
+  }
+  if (!isPlainObject(call.parsedArguments)) {
+    return schemaCorrectionFailure('The schema-correction Recovery did not produce a JSON object.', plan, {
+      recoveryFailureReason: 'invalid_claude_code_tool_input',
+    });
+  }
+  const schemaValidation = validateAgainstToolSchema(
+    { name: plan.toolName, input_schema: plan.inputSchema },
+    call.parsedArguments,
+  );
+  if (!schemaValidation.ok) {
+    return schemaCorrectionFailure(schemaValidation.detail, plan, {
+      recoveryFailureReason: schemaValidation.reason,
+      ...(schemaValidation.diagnostics || {}),
+    });
+  }
+  if (!sameJsonValue(call.parsedArguments, plan.expectedArguments)) {
+    return schemaCorrectionFailure('The schema-correction Recovery changed arguments other than the unsupported property.', plan, {
+      recoveryFailureReason: 'schema_correction_argument_mismatch',
+    });
+  }
+  return { ok: true };
 }
 
 function recoveryCall(output) {

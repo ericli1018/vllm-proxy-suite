@@ -4,8 +4,11 @@ import { loadCommonConfig, parseBoolean, parseCsv, trimTrailingSlash } from '../
 import { anthropicMessagesAdapter, applyAnthropicRequestPolicy, buildAnthropicRecoveryRequest, normalizeAnthropicToolStopReason } from '../../packages/anthropic/messages.js';
 import {
   analyzeClaudeCodeToolAttempt,
+  buildClaudeCodeSchemaCorrectionRecovery,
   buildClaudeCodeToolRecovery,
+  isTargetedToolInputSchemaCorrectionIssue,
   isTargetlessClaudeCodeToolRecoveryIssue,
+  validateClaudeCodeSchemaCorrectionRecovery,
   validateClaudeCodeToolRecovery,
   validateExposedClaudeCodeToolCalls,
 } from '../../packages/anthropic/claude-code-tools/recovery.js';
@@ -51,6 +54,7 @@ export function loadAnthropicConfig(env = process.env) {
     claudeCodeActionIntentGuardEnabled: parseBoolean(env.CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED, true),
     claudeCodePlaceholderCompletionGuardEnabled: parseBoolean(env.CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED, true),
     claudeCodeToolInputSchemaGuardEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED, true),
+    claudeCodeTargetedSchemaCorrectionEnabled: parseBoolean(env.CLAUDE_CODE_TARGETED_SCHEMA_CORRECTION_ENABLED, true),
     claudeCodeToolStopReasonNormalizationEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED, true),
     claudeCodeEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_EDIT_RECOVERY_ENABLED, true),
     claudeCodeWriteRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_WRITE_RECOVERY_ENABLED, true),
@@ -158,6 +162,10 @@ export function createAnthropicGuardedRoute(config, options = {}) {
             retryable: !recovery,
             diagnostics: {
               ...(exposedToolValidation.diagnostics || {}),
+              targetedSchemaCorrection: Boolean(
+                config.claudeCodeTargetedSchemaCorrectionEnabled
+                && exposedToolValidation.diagnostics?.targetedSchemaCorrectionAvailable === true
+              ),
               toolInputSchemaRecoveryAttempted: Boolean(recovery),
             },
           };
@@ -272,6 +280,18 @@ export function createAnthropicGuardedRoute(config, options = {}) {
         });
       }
       if (
+        config.claudeCodeToolInputSchemaGuardEnabled
+        && config.claudeCodeTargetedSchemaCorrectionEnabled
+        && isTargetedToolInputSchemaCorrectionIssue(reason)
+      ) {
+        return buildClaudeCodeSchemaCorrectionRecovery({
+          original: originalBody,
+          prepared: firstBody || applyAnthropicRequestPolicy(originalBody, config),
+          issue: reason,
+          config,
+        });
+      }
+      if (
         ['thinking_without_output', 'placeholder_completion_without_progress'].includes(reason?.reason)
         || (config.claudeCodeToolInputSchemaGuardEnabled && reason?.reason === 'invalid_tool_input_schema')
         || (config.claudeCodeToolRecoveryEnabled && isTargetlessClaudeCodeToolRecoveryIssue(reason))
@@ -301,6 +321,9 @@ export function createAnthropicGuardedRoute(config, options = {}) {
       }
       if (recovery.plan.mode === 'output_required') {
         return validateAnthropicOutputRequiredRecovery(output, recovery.plan);
+      }
+      if (recovery.plan.mode === 'schema_correction') {
+        return validateClaudeCodeSchemaCorrectionRecovery(output, recovery.plan);
       }
       return validateClaudeCodeToolRecovery(output, recovery.plan);
     },

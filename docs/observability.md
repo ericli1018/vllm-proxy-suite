@@ -656,7 +656,18 @@ recoveryToolChoice="auto"
 toolInputSchemaRecovery=true
 ```
 
-A second schema-invalid Tool Call logs `tool_input_schema_recovery_fused` with `retryable=false`.
+For a single safely removable extra property, the initial event is:
+
+```text
+tool_input_schema_correction_started
+rejectedToolName="TaskCreate"
+removedInputPath="$.status"
+schemaKeyword="additionalProperties"
+```
+
+The built Recovery reports `recoveryMode="schema_correction"`, `recoveryContextMode="scoped"`, one selected Tool, and `forcedToolChoice=true`. Success emits `tool_input_schema_correction_completed`; text-only output, a changed Tool name, modified accepted arguments, or another invalid input emits `tool_input_schema_correction_fused` with `retryable=false`.
+
+A second generic schema-invalid Tool Call logs `tool_input_schema_recovery_fused` with `retryable=false`. Prometheus additionally exposes `vllm_cc_proxy_tool_input_schema_corrections_started_total`, `..._succeeded_total`, and `..._fused_total`.
 
 A schema-valid Tool Call that arrives with an incorrect `end_turn` terminal logs:
 

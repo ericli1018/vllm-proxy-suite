@@ -678,16 +678,24 @@ additionalProperties:false
 
 例如模型輸出 `TaskUpdate({"status":"completed"})`，但本次 Tool Schema 要求 `taskId`，Proxy 會在 replay 前將該 Attempt 分類為 `invalid_tool_input_schema`，不會讓 Claude Code 執行後才產生 `InputValidationError`。
 
-初次命中使用一個 generic Output-Required Recovery，保留完整 `tools[]` 與原始 `tool_choice`；`auto` 仍為 `auto`。Recovery 不會猜測缺失的 ID，也不會強制重試原 Tool；它可先呼叫 `TaskList`／其他讀取型 Tool、產生另一個完整有效 Tool Call、輸出實質結果，或詢問一個真正阻塞問題。第二次仍產生 schema-invalid Tool Call 時，Proxy 保留 `reason="invalid_tool_input_schema"` 並回傳 `retryable=false`。
+Schema Recovery 依可確定性分流：
+
+- 若錯誤是單一 `additionalProperties:false` 違規，且只移除該欄位後其餘輸入已完全符合 Schema，Proxy 進入 `schema_correction`。Recovery 只保留原 Tool，強制 `tool_choice={type:"tool",name:<tool>,disable_parallel_tool_use:true}`，並使用縮減後的一則訊息上下文。修正後參數必須與原參數完全相同，只能刪除該不允許欄位。
+- 若缺少 `taskId`／路徑／外部識別碼、有多個不允許欄位，或刪除一個欄位後仍不合法，維持 generic Output-Required Recovery，保留完整 `tools[]` 與原始 `tool_choice`；`auto` 仍為 `auto`。Recovery 不會猜測缺失資料，可先呼叫 `TaskList`／其他讀取型 Tool。
+
+第二次仍無法產生符合契約的結果時，Proxy 保留 `reason="invalid_tool_input_schema"` 並回傳 `retryable=false`。
 
 Lifecycle：
 
 ```text
+tool_input_schema_correction_started
+tool_input_schema_correction_completed
+tool_input_schema_correction_fused
 tool_input_schema_recovery_started
 tool_input_schema_recovery_fused
 ```
 
-可用 `CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED=false` 停用此 Guard。未知或未支援的 JSON Schema 關鍵字採保守忽略；`$ref` 與複合 Schema 不會被 Proxy 猜測展開。
+可用 `CLAUDE_CODE_TARGETED_SCHEMA_CORRECTION_ENABLED=false` 單獨停用精準修正並退回 generic Recovery；`CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED=false` 則停用整個 Guard。未知或未支援的 JSON Schema 關鍵字採保守忽略；`$ref` 與複合 Schema 不會被 Proxy 猜測展開。
 
 當模型已產生完整 `tool_use` block，但錯誤以 `stop_reason="end_turn"` 結束時，Proxy 不會直接忽略協議矛盾。只有在所有 Tool Call JSON 完整、Tool 名稱存在於本次 `tools[]`，且輸入通過該 Tool 的 `input_schema` 後，才會將實際 SSE／JSON 的 `end_turn` 正規化為 `tool_use` 並繼續既有語意驗證與 Recovery target 驗證。未知 Tool、缺少必要欄位、型別錯誤、Malformed JSON、未閉合 block 或失敗終止都不會被正規化。成功時記錄 `tool_stop_reason_normalized`；可用 `CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED=false` 恢復嚴格拒絕。
 
@@ -841,6 +849,7 @@ targetless_tool_recovery_fused
 | `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED` | `true`；阻擋立即行動宣告後無 Tool Call 的 `end_turn` |
 | `CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED` | `true`；阻擋 Tool Result 後只有 `No response`／`No output` 類佔位內容的 `end_turn` |
 | `CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED` | `true`；所有 Anthropic Tool Call 在 replay 前依本次 `input_schema` 驗證 |
+| `CLAUDE_CODE_TARGETED_SCHEMA_CORRECTION_ENABLED` | `true`；單一可安全移除的額外欄位使用強制原 Tool 的縮減上下文修正 |
 | `CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED` | `true`；僅將完整且 schema-valid Tool Call 的錯誤 `end_turn` 改寫為 `tool_use` |
 | `CLAUDE_CODE_EDIT_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_WRITE_RECOVERY_ENABLED` | `true` |

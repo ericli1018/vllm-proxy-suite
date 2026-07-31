@@ -53,6 +53,9 @@ function createMetrics() {
     targetlessToolRecoveriesFusedTotal: 0,
     toolInputSchemaRecoveriesDetectedTotal: 0,
     toolInputSchemaRecoveriesFusedTotal: 0,
+    toolInputSchemaCorrectionsStartedTotal: 0,
+    toolInputSchemaCorrectionsSucceededTotal: 0,
+    toolInputSchemaCorrectionsFusedTotal: 0,
     toolStopReasonNormalizationsTotal: 0,
     hostedToolsFilteredTotal: 0,
     requiredHostedToolsRejectedTotal: 0,
@@ -497,6 +500,10 @@ export function createProtocolProxyRuntime({
         } else if (toolInputSchemaRecovery) {
           metrics.toolInputSchemaRecoveriesDetectedTotal += 1;
           if (recovery) metrics.toolInputSchemaRecoveriesFusedTotal += 1;
+          if (validation?.diagnostics?.targetedSchemaCorrection === true) {
+            if (recovery) metrics.toolInputSchemaCorrectionsFusedTotal += 1;
+            else metrics.toolInputSchemaCorrectionsStartedTotal += 1;
+          }
         } else if (thinkingWithoutOutput) {
           metrics.thinkingWithoutOutputRecoveriesFusedTotal += 1;
         } else if (placeholderCompletion) {
@@ -513,7 +520,11 @@ export function createProtocolProxyRuntime({
         if (targetlessToolRecovery) {
           event = recovery ? 'targetless_tool_recovery_fused' : 'targetless_tool_recovery_started';
         } else if (toolInputSchemaRecovery) {
-          event = recovery ? 'tool_input_schema_recovery_fused' : 'tool_input_schema_recovery_started';
+          if (validation?.diagnostics?.targetedSchemaCorrection === true) {
+            event = recovery ? 'tool_input_schema_correction_fused' : 'tool_input_schema_correction_started';
+          } else {
+            event = recovery ? 'tool_input_schema_recovery_fused' : 'tool_input_schema_recovery_started';
+          }
         } else if (thinkingWithoutOutput) {
           event = 'thinking_without_output_fused';
         } else if (placeholderCompletion) {
@@ -895,12 +906,23 @@ export function createProtocolProxyRuntime({
         if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateRecovery) {
           const recoveryValidation = route.validateRecovery(attempt, recovery);
           if (!recoveryValidation.ok) {
-            recordActionlessCompletion(recoveryValidation, 2, recovery.plan?.mode === 'action_required');
+            recordActionlessCompletion(
+              recoveryValidation,
+              2,
+              ['action_required', 'schema_correction'].includes(recovery.plan?.mode),
+            );
             attempt = { kind: 'invalid', ...recoveryValidation, result: attempt.result };
           }
         }
         if (attempt.kind === 'success' || attempt.kind === 'tool_passthrough') {
           metrics.recoverySuccessTotal += 1;
+          if (recovery.plan?.mode === 'schema_correction') {
+            metrics.toolInputSchemaCorrectionsSucceededTotal += 1;
+            requestLogger.info('tool_input_schema_correction_completed', {
+              rejectedToolName: recovery.plan.toolName,
+              removedInputPath: recovery.plan.removedInputPath,
+            });
+          }
           requestLogger.info('recovery_completed', { elapsedMs: elapsedMs() });
         }
       }

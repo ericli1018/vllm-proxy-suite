@@ -103,9 +103,11 @@ test('homogeneous parallel WebSearch calls are queued internally and report each
 
   assert.match(await final.text(), /Batch search complete/);
   assert.equal(peakSearches, 2);
-  assert.deepEqual(progress.map((event) => event.toolUseId), ['fast-id', 'slow-id']);
-  assert.equal(progress[0].slowFinished, false);
-  assert.deepEqual(progress.map((event) => [event.completed, event.total]), [[1, 2], [2, 2]]);
+  const completedProgress = progress.filter((event) => event.phase === 'completed');
+  assert.deepEqual(completedProgress.map((event) => event.toolUseId), ['fast-id', 'slow-id']);
+  assert.equal(completedProgress[0].slowFinished, false);
+  assert.deepEqual(completedProgress.map((event) => [event.completed, event.total]), [[1, 2], [2, 2]]);
+  assert.deepEqual(progress.filter((event) => event.phase === 'started').map((event) => event.toolUseId), ['slow-id', 'fast-id']);
 
   const toolResults = vllmBodies[1].messages.at(-1).content;
   assert.deepEqual(toolResults.map((item) => item.tool_use_id), ['slow-id', 'fast-id']);
@@ -144,7 +146,8 @@ test('homogeneous parallel WebFetch calls remain proxy-managed and preserve tool
   });
 
   assert.match(await final.text(), /Batch fetch complete/);
-  assert.deepEqual(progress.map((event) => event.toolUseId), ['fetch-b', 'fetch-a']);
+  assert.deepEqual(progress.filter((event) => event.phase === 'completed').map((event) => event.toolUseId), ['fetch-b', 'fetch-a']);
+  assert.deepEqual(progress.filter((event) => event.phase === 'started').map((event) => event.toolUseId), ['fetch-a', 'fetch-b']);
   const continuation = vllmBodies.find((body) => Array.isArray(body.messages?.at(-1)?.content) && body.messages.at(-1).content.length === 2);
   assert.ok(continuation);
   assert.deepEqual(continuation.messages.at(-1).content.map((item) => item.tool_use_id), ['fetch-a', 'fetch-b']);

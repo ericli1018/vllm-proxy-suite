@@ -49,6 +49,7 @@ const required = [
   'test/anthropic-webfetch-bridge-v070.test.js',
   'test/anthropic-webfetch-bridge-integration-v070.test.js',
   'test/anthropic-managed-stream-envelope-v072.test.js',
+  'test/anthropic-managed-visible-progress-v073.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -73,7 +74,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.2') errors.push('package.json version must be 0.7.2');
+if (packageJson.version !== '0.7.3') errors.push('package.json version must be 0.7.3');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -89,6 +90,11 @@ if (!/ports:[\s\S]*3456:3456/.test(compose)) errors.push('Suite service must pub
 if (!compose.includes('node /app/vllm-proxy-suite.js')) errors.push('Compose must start vllm-proxy-suite.js');
 if (!compose.includes('VLLM_CC_PROXY_API_KEY')) errors.push('Compose must expose the Anthropic API key');
 if (!compose.includes('VLLM_OPENAI_PROXY_API_KEY')) errors.push('Compose must expose the OpenAI API key');
+if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_MODE')) errors.push('Compose must expose managed progress mode');
+if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_DETAIL')) errors.push('Compose must expose managed progress detail');
+if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS')) errors.push('Compose must expose managed progress interval');
+if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_MAX_LABEL_CHARS')) errors.push('Compose must expose managed progress label bound');
+if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_MAX_DOTS')) errors.push('Compose must expose managed progress dot wrap');
 if (!compose.includes('PROGRESS_LOG_INTERVAL_MS')) errors.push('Compose must expose progress logging interval');
 if (!compose.includes('PROGRESS_STALL_WARNING_MS')) errors.push('Compose must expose stall warning threshold');
 if (!compose.includes('LOG_FORMAT')) errors.push('Compose must expose log format');

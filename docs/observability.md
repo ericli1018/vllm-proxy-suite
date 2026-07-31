@@ -10,6 +10,31 @@
 
 Use `info` normally, `debug` for long reasoning or Tool-loop diagnosis, and `trace` only for short controlled reproductions.
 
+## Managed Web visible progress
+
+Managed Web queue activity emits:
+
+```text
+managed_tool_item_started
+managed_tool_item_completed
+managed_stream_started
+managed_stream_splice_completed
+```
+
+`managed_tool_item_started` and `managed_tool_item_completed` never log the search query, URL, snippet, document body, Authorization header, Cookie, or API key. The Claude Code-visible progress writer receives the query or URL only inside the request-local callback, sanitizes control characters, bounds labels, and reduces WebFetch targets to hostname before writing SSE. Synthetic progress text begins with U+2063 and is removed from later Anthropic message history before vLLM access.
+
+Default progress controls:
+
+```text
+MANAGED_WEB_STREAM_PROGRESS_MODE=visible
+MANAGED_WEB_STREAM_PROGRESS_DETAIL=query
+MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS=5000
+MANAGED_WEB_STREAM_PROGRESS_MAX_LABEL_CHARS=160
+MANAGED_WEB_STREAM_PROGRESS_MAX_DOTS=12
+```
+
+Ordinary Bash/Read/Write and text-only responses do not start the synthetic lifecycle.
+
 ## Recovery request construction
 
 OpenAI Chat Recovery emits a debug record before the second upstream attempt:

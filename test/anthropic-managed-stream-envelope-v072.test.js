@@ -138,7 +138,7 @@ test('managed stream splicing preserves a final Claude Code Tool Call with shift
   assert.doesNotMatch(all, /m-upstream/);
 });
 
-test('managed stream closes its progress block before a streamed upstream error', async (t) => {
+test('upstream error before any managed tool keeps the original HTTP error response', async (t) => {
   const config = { ...loadAnthropicConfig({
     PROXY_HOST: '127.0.0.1', VLLM_BASE_URL: 'http://vllm:8001', VLLM_API_KEY: 'vllm', VLLM_CC_PROXY_API_KEY: 'client',
     CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED: 'true', SEARXNG_BASE_URL: 'http://searxng:8080',
@@ -159,10 +159,9 @@ test('managed stream closes its progress block before a streamed upstream error'
     body: JSON.stringify({ model: 'm', stream: true, messages: [{ role: 'user', content: 'news' }], tools: [{ name: 'WebSearch', input_schema: { type: 'object' } }] }),
   });
   const all = await response.text();
-  assert.equal(response.status, 200);
-  assert.equal(count(all, /event: message_start/g), 1);
-  assert.equal(count(all, /"type":"content_block_stop","index":0/g), 1);
-  assert.match(all, /event: error/);
+  assert.equal(response.status, 400);
+  assert.equal(count(all, /event: message_start/g), 0);
+  assert.doesNotMatch(all, /content_block_stop/);
   assert.match(all, /upstream_http_error/);
 });
 

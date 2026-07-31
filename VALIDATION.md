@@ -1,47 +1,58 @@
-# VLLM-PROXY-SUITE v0.7.2 Validation
+# VLLM-PROXY-SUITE v0.7.3 Validation
 
 Validation date: 2026-07-31
 
 ## Scope
 
-This release replaces pre-message SSE comments and `event: ping` keepalives for Managed WebSearch/WebFetch with a valid synthetic Anthropic Messages stream envelope. It validates immediate downstream message lifecycle start, periodic invisible text deltas, final vLLM SSE splicing, homogeneous Managed Web Tool queues, Tool ID preservation, no-thinking internal requests, both protocol runtimes, Compose packaging, and clean extraction.
+This release replaces blank zero-width Claude Code progress bullets with lazy, visible Managed WebSearch/WebFetch progress. It validates that ordinary text and Claude Code native Tool responses remain unchanged; Managed WebSearch displays a sanitized bounded query; Managed WebFetch displays hostname only; periodic visible ellipses keep the stream active; completion states are appended; synthetic progress is removed from later vLLM history; and the final upstream response remains one valid Anthropic message lifecycle.
 
 ## Source verification
 
-- Tests: 239 passed, 0 failed.
+- Tests: 245 passed, 0 failed.
 - `npm run check`: passed.
-- JavaScript syntax: 60 files passed `node --check`.
-- Package validator: `valid:true`, version `0.7.2`, 74 files, 45 required files.
+- JavaScript syntax: 62 files passed `node --check`.
+- Package validator: `valid:true`, version `0.7.3`, 76 files, 46 required files.
 - Compose YAML: parsed successfully.
 - Embedded Gateway and SearXNG shell: passed `sh -n`.
-- Compose exposes `MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS=${MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS:-15000}`.
+- Compose defaults verified:
+  - `MANAGED_WEB_STREAM_PROGRESS_MODE=visible`
+  - `MANAGED_WEB_STREAM_PROGRESS_DETAIL=query`
+  - `MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS=5000`
+  - `MANAGED_WEB_STREAM_PROGRESS_MAX_LABEL_CHARS=160`
+  - `MANAGED_WEB_STREAM_PROGRESS_MAX_DOTS=12`
 - Gateway `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`: passed.
 - Metrics include:
+  - `vllm_cc_proxy_managed_web_tool_items_completed_total`
   - `vllm_cc_proxy_managed_stream_progress_deltas_total`
   - `vllm_cc_proxy_managed_stream_splices_total`
 - Graceful SIGTERM: exit code 0.
 
-## Managed stream envelope verification
+## Visible Managed Web progress verification
 
-- Streaming begins with one synthetic `message_start` before waiting for Managed Web Tool completion.
-- A dedicated progress text block uses content block index 0.
-- An invisible `text_delta` is sent immediately and periodically according to `MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS`.
-- Queue-item completion sends an additional valid progress delta.
-- The final upstream `message_start` is discarded.
-- Every upstream content block index is shifted by one.
-- The progress block is closed exactly once before final upstream content.
+- Ordinary Bash Tool responses do not create a synthetic progress content block or an empty Claude Code bullet.
+- The synthetic Anthropic lifecycle starts only after the Managed Tool queue emits its first `started` event.
+- WebSearch status displays a control-character-cleaned and whitespace-normalized query, bounded by `MANAGED_WEB_STREAM_PROGRESS_MAX_LABEL_CHARS`.
+- WebFetch status displays hostname only and does not reveal URL path, query string, token, session parameter, Cookie, Authorization header, snippet, or document content.
+- Periodic progress uses valid Anthropic `content_block_delta` text events.
+- Visible modes append ellipses continuously and wrap after `MANAGED_WEB_STREAM_PROGRESS_MAX_DOTS`; invisible mode remains available.
+- Parallel Managed Tool items emit start and completion states while completion order may differ from request order.
+- Tool Results preserve original `tool_use_id` order for the single protocol-correct continuation.
+- Search completion may report normalized result count; WebFetch completion may report analyzed chunk count.
+- Synthetic progress text begins with U+2063 and is removed from inbound Anthropic message history before vLLM access.
 - Final responses contain exactly one `message_start` and one `message_stop`.
-- Final Claude Code Tool Calls such as `Bash` retain their Tool ID and arguments after index shifting.
-- Streamed upstream errors close the progress block before `event:error`.
-- Managed streaming does not use pre-message `event: ping` or SSE comments for idle-timeout prevention.
+- Final Claude Code Tool Calls retain Tool ID and arguments after content-block index shifting.
+- A continuation HTTP error after the synthetic stream starts closes progress block index 0 before emitting `event:error`.
+- An upstream error before any Managed Tool is identified retains the original HTTP error response and does not create a synthetic lifecycle.
+- Managed WebSearch continuations, WebFetch readers, synthesizers, and continuations retain `think:false` and `chat_template_kwargs.enable_thinking=false`.
 
-## Clean ZIP verification
+## Clean candidate ZIP verification
 
-- Candidate ZIP tests: 239 passed, 0 failed.
+- Candidate ZIP tests: 245 passed, 0 failed.
 - Candidate `npm run check`: passed.
-- Candidate JavaScript syntax: 60 files passed.
-- Candidate package validator: `valid:true`, version `0.7.2`, 74 files, 45 required files.
+- Candidate JavaScript syntax: 62 files passed.
+- Candidate package validator: `valid:true`, version `0.7.3`, 76 files, 46 required files.
 - Candidate Compose YAML and embedded shell: passed.
+- Candidate focused visible-progress tests: passed.
 - Candidate Gateway health and metrics: passed.
 - Candidate graceful SIGTERM: exit code 0.
 - Source and candidate ZIP file manifests: identical.
@@ -51,11 +62,13 @@ This release replaces pre-message SSE comments and `event: ping` keepalives for 
 
 - Live Claude Code → Gateway → target vLLM → SearXNG/public website integration.
 - Docker image build or real Compose startup.
-- A real 310-second Claude Code idle-watchdog run.
-- Production concurrency, long-duration load, or network-failure testing.
+- Real Claude Code UI rendering across all client versions.
+- A long-duration Claude Code idle-watchdog test against production network latency.
+- Production concurrency, load, DNS failure, or external-site anti-bot behavior.
 - Browser JavaScript rendering for dynamic websites.
 
-## Operational note
+## Operational notes
 
-When either Managed Web bridge is enabled, all streaming Anthropic Messages requests on that route use the synthetic stream envelope because the Managed Web wrapper buffers upstream sub-responses before deciding whether a Tool Call is managed. This prevents silent downstream waiting even before the first Managed Tool is identified. The progress block contains zero-width text; it is normally invisible, but a client that exposes invisible Unicode may show an empty text block.
-The synthetic `message_start` is emitted before upstream usage is available, so downstream `usage.input_tokens` is `0`; Proxy completion diagnostics still use the actual upstream usage.
+The default `visible` mode intentionally creates one synthetic assistant progress text block only for Managed WebSearch/WebFetch. Claude Code may retain that block in its local conversation transcript, but the Proxy removes the U+2063-marked block before forwarding later history to vLLM. The final model content is delivered in subsequent content-block indexes inside the same Anthropic message lifecycle.
+
+Because the synthetic `message_start` is emitted before upstream usage is available, downstream `usage.input_tokens` is `0`; Proxy completion diagnostics still use the actual upstream usage reported by vLLM.

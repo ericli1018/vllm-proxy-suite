@@ -3,8 +3,10 @@ import { SseFrameDecoder } from '../core/sse.js';
 import {
   createManagedAnthropicProgressDelta,
   createManagedAnthropicProgressStop,
+  createManagedAnthropicStatusDelta,
   createManagedAnthropicStreamStart,
   spliceManagedAnthropicStream,
+  stripManagedProgressBlocks,
 } from './stream-envelope.js';
 
 const UNSUPPORTED_FIELDS = [
@@ -327,6 +329,7 @@ function normalizeNonStream(payload) {
 
 export function applyAnthropicRequestPolicy(input, config) {
   const body = structuredClone(input);
+  body.messages = stripManagedProgressBlocks(body.messages);
   for (const field of UNSUPPORTED_FIELDS) delete body[field];
 
   if (!isNumber(body.temperature, 0, 1)) delete body.temperature;
@@ -428,6 +431,7 @@ export const anthropicMessagesAdapter = Object.freeze({
   managedStreamEnvelope: Object.freeze({
     start: createManagedAnthropicStreamStart,
     progress: createManagedAnthropicProgressDelta,
+    status: createManagedAnthropicStatusDelta,
     stop: createManagedAnthropicProgressStop,
     splice: spliceManagedAnthropicStream,
   }),

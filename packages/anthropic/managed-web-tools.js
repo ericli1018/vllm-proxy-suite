@@ -255,7 +255,7 @@ async function notifyManagedProgress(callback, event) {
   }
 }
 
-async function runManagedQueue(items, maxParallel, worker, onSettled) {
+async function runManagedQueue(items, maxParallel, worker, onSettled, onStarted) {
   const results = new Array(items.length);
   let cursor = 0;
   let completed = 0;
@@ -265,6 +265,7 @@ async function runManagedQueue(items, maxParallel, worker, onSettled) {
       cursor += 1;
       if (index >= items.length) return;
       const startedAt = Date.now();
+      await onStarted?.(items[index], { index, total: items.length });
       const value = await worker(items[index], index);
       results[index] = value;
       completed += 1;
@@ -279,6 +280,11 @@ async function runManagedQueue(items, maxParallel, worker, onSettled) {
   const concurrency = Math.min(items.length, positiveInteger(maxParallel, 1));
   await Promise.all(Array.from({ length: concurrency }, () => runner()));
   return results;
+}
+
+function managedProgressDisplayValue(kind, call) {
+  if (kind === 'fetch') return asString(call?.input?.url);
+  return asString(call?.input?.query ?? call?.input?.q ?? call?.input?.search_query);
 }
 
 function removeManagedTools(requestBody, config, kind = 'all') {
@@ -774,16 +780,31 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
       const overflow = managed.calls.slice(maxBatch);
       const progressTotal = managed.calls.length;
       let progressCompleted = 0;
+      const emitStarted = async (call) => {
+        await notifyManagedProgress(onManagedProgress, {
+          phase: 'started',
+          kind,
+          toolUseId: call.id,
+          toolName: call.name,
+          displayValue: managedProgressDisplayValue(kind, call),
+          completed: progressCompleted,
+          total: progressTotal,
+        });
+      };
       const emitProgress = async (entry, details = {}) => {
         progressCompleted += 1;
         await notifyManagedProgress(onManagedProgress, {
+          phase: 'completed',
           kind,
           toolUseId: entry.call.id,
           toolName: entry.call.name,
+          displayValue: managedProgressDisplayValue(kind, entry.call),
           ok: !entry.isError,
           completed: progressCompleted,
           total: progressTotal,
           durationMs: details.durationMs ?? 0,
+          ...(Number.isInteger(entry.resultCount) ? { resultCount: entry.resultCount } : {}),
+          ...(Number.isInteger(entry.chunks) ? { chunks: entry.chunks } : {}),
         });
       };
 
@@ -801,7 +822,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
           async (call) => {
             try {
               const normalized = await executeSearch(fetchImpl, call, config, upstreamInit.signal);
-              return { call, content: normalized.text, isError: false };
+              return { call, content: normalized.text, isError: false, resultCount: normalized.results.length };
             } catch (error) {
               if (upstreamInit.signal?.aborted) throw error;
               stats.searchFailures += 1;
@@ -813,6 +834,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
             results[originalIndex] = entry;
             await emitProgress(entry, details);
           },
+          emitStarted,
         );
         void executed;
 
@@ -850,7 +872,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
           try {
             const fetched = await executeWebFetch(fetchImpl, url, upstreamInit, requestBody, call, config, upstreamInit.signal, dependencies);
             stats.fetchChunks += fetched.chunks;
-            return { call, content: fetched.text, isError: false };
+            return { call, content: fetched.text, isError: false, chunks: fetched.chunks };
           } catch (error) {
             if (upstreamInit.signal?.aborted) throw error;
             stats.fetchFailures += 1;
@@ -862,6 +884,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
           results[originalIndex] = entry;
           await emitProgress(entry, details);
         },
+        emitStarted,
       );
 
       for (const call of limited) {

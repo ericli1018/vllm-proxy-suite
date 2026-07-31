@@ -15,6 +15,12 @@ function positiveInteger(value, fallback) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+
+function enumValue(value, allowed, fallback) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return allowed.includes(normalized) ? normalized : fallback;
+}
+
 function boundedInteger(value, fallback, min, max) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
@@ -40,7 +46,11 @@ export function loadAnthropicConfig(env = process.env) {
     managedWebFetchToolNames: parseCsv(env.CLAUDE_CODE_WEBFETCH_TOOL_NAMES || 'WebFetch'),
     managedWebToolsThink: parseBoolean(env.MANAGED_WEB_TOOLS_THINK, false),
     managedWebToolsMaxBatch: positiveInteger(env.MANAGED_WEB_TOOLS_MAX_BATCH, 8),
-    managedWebStreamProgressIntervalMs: positiveInteger(env.MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS, 15000),
+    managedWebStreamProgressMode: enumValue(env.MANAGED_WEB_STREAM_PROGRESS_MODE, ['visible', 'minimal', 'invisible', 'off'], 'visible'),
+    managedWebStreamProgressDetail: enumValue(env.MANAGED_WEB_STREAM_PROGRESS_DETAIL, ['query', 'tool'], 'query'),
+    managedWebStreamProgressIntervalMs: positiveInteger(env.MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS, 5000),
+    managedWebStreamProgressMaxLabelChars: boundedInteger(env.MANAGED_WEB_STREAM_PROGRESS_MAX_LABEL_CHARS, 160, 16, 1000),
+    managedWebStreamProgressMaxDots: boundedInteger(env.MANAGED_WEB_STREAM_PROGRESS_MAX_DOTS, 12, 0, 100),
     webSearchMaxParallel: positiveInteger(env.WEBSEARCH_MAX_PARALLEL, 2),
     webFetchMaxParallel: positiveInteger(env.WEBFETCH_MAX_PARALLEL, 2),
     searxngBaseUrl: trimTrailingSlash(env.SEARXNG_BASE_URL || ''),

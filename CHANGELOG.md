@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.3 - 2026-07-31
+
+- Replaced blank zero-width Claude Code progress bullets with visible Managed WebSearch/WebFetch status text. WebSearch displays a sanitized bounded query; WebFetch displays hostname only.
+- Changed the synthetic Anthropic stream envelope from eager to lazy activation. Ordinary text, Bash, Read, Write, and other Claude Code Tool responses no longer receive an extra progress content block.
+- Added `started` and `completed` Managed Tool queue events. Parallel items display start and completion states while preserving original Tool Result IDs and continuation order.
+- Added periodic visible ellipses with configurable line wrapping; valid zero-width deltas remain available through `invisible` mode.
+- Added U+2063 progress-block marking and inbound history stripping so synthetic UI text is never forwarded to vLLM or retained in model prefix context.
+- Added `MANAGED_WEB_STREAM_PROGRESS_MODE`, `MANAGED_WEB_STREAM_PROGRESS_DETAIL`, `MANAGED_WEB_STREAM_PROGRESS_MAX_LABEL_CHARS`, and `MANAGED_WEB_STREAM_PROGRESS_MAX_DOTS`; changed the default interval to 5000 ms.
+- Preserved no-thinking Managed Web requests, one Anthropic message lifecycle, final SSE block-index splicing, error closure, bounded parallel queues, and mixed-tool passthrough.
+- Added v0.7.3 focused, deployment, history-sanitization, ordinary-Tool, visible-query, hostname-redaction, periodic-progress, and continuation-error regressions.
+
 ## 0.7.2 - 2026-07-31
 
 - Replaced pre-message SSE comments and `event: ping` keepalives with a valid synthetic Anthropic Messages stream envelope whenever a Managed Web bridge is enabled.

@@ -472,9 +472,17 @@ export function createProtocolProxyRuntime({
       const managedStreamEnvelope = streaming && route.managedStreamEnvelopeEnabled
         ? route.adapter.managedStreamEnvelope
         : null;
+      const managedProgressConfig = {
+        mode: config.managedWebStreamProgressMode || 'visible',
+        detail: config.managedWebStreamProgressDetail || 'query',
+        maxLabelChars: config.managedWebStreamProgressMaxLabelChars || 160,
+        maxDots: config.managedWebStreamProgressMaxDots ?? 12,
+      };
       let managedStreamWrite = Promise.resolve();
       let managedStreamTimer = null;
       let managedStreamFinalized = false;
+      let managedStreamStarted = false;
+      let managedStreamDotCount = 0;
       const enqueueManagedStreamChunk = (chunk, { progress = false, itemProgress = false } = {}) => {
         managedStreamWrite = managedStreamWrite.then(async () => {
           if (response.destroyed || response.writableEnded) return false;
@@ -494,7 +502,8 @@ export function createProtocolProxyRuntime({
         if (managedStreamTimer) clearInterval(managedStreamTimer);
         managedStreamTimer = null;
       };
-      if (managedStreamEnvelope) {
+      const startManagedStream = async (event = {}) => {
+        if (!managedStreamEnvelope || managedStreamStarted || managedProgressConfig.mode === 'off') return false;
         response.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache, no-store',
@@ -502,25 +511,51 @@ export function createProtocolProxyRuntime({
           'x-accel-buffering': 'no',
         });
         response.flushHeaders?.();
+        managedStreamStarted = true;
         await enqueueManagedStreamChunk(managedStreamEnvelope.start({
           requestId,
           model: firstBody.model || originalBody.model || 'managed-web-tools',
+          event,
+          progressConfig: managedProgressConfig,
         }), { progress: true });
         requestLogger.info('managed_stream_started', {
           progressIntervalMs: config.managedWebStreamProgressIntervalMs,
+          progressMode: managedProgressConfig.mode,
+          progressDetail: managedProgressConfig.detail,
+          kind: event.kind || null,
         });
         managedStreamTimer = setInterval(() => {
-          void enqueueManagedStreamChunk(managedStreamEnvelope.progress(), { progress: true });
+          const chunk = managedStreamEnvelope.progress({
+            mode: managedProgressConfig.mode,
+            dotCount: managedStreamDotCount,
+            maxDots: managedProgressConfig.maxDots,
+          });
+          managedStreamDotCount += 1;
+          void enqueueManagedStreamChunk(chunk, { progress: true });
         }, config.managedWebStreamProgressIntervalMs);
         managedStreamTimer.unref?.();
-      }
+        return true;
+      };
       const heartbeat = streaming && !managedStreamEnvelope ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
       const deliverManagedProgress = streaming
-        ? (event = {}) => {
+        ? async (event = {}) => {
           if (managedStreamEnvelope) {
-            return enqueueManagedStreamChunk(managedStreamEnvelope.progress(), { progress: true, itemProgress: true });
+            const startedNow = await startManagedStream(event);
+            if (!managedStreamStarted) return false;
+            if (!startedNow) {
+              await enqueueManagedStreamChunk(
+                managedStreamEnvelope.status(event, managedProgressConfig),
+                { progress: true, itemProgress: event.phase === 'completed' },
+              );
+            } else if (event.phase === 'completed') {
+              await enqueueManagedStreamChunk(
+                managedStreamEnvelope.status(event, managedProgressConfig),
+                { progress: true, itemProgress: event.phase === 'completed' },
+              );
+            }
+            return true;
           }
-          if (response.destroyed || response.writableEnded) return Promise.resolve(false);
+          if (response.destroyed || response.writableEnded) return false;
           if (!response.headersSent) {
             response.writeHead(200, {
               'content-type': 'text/event-stream; charset=utf-8',
@@ -530,11 +565,12 @@ export function createProtocolProxyRuntime({
             });
           }
           metrics.managedWebToolProgressPingsTotal += 1;
-          return writeResponseChunk(response, Buffer.from('event: ping\ndata: {"type":"ping"}\n\n'));
+          await writeResponseChunk(response, Buffer.from('event: ping\ndata: {"type":"ping"}\n\n'));
+          return true;
         }
         : null;
       const sendManagedSuccess = async (attempt) => {
-        if (!managedStreamEnvelope) return sendBufferedSuccess(response, attempt);
+        if (!managedStreamStarted) return sendBufferedSuccess(response, attempt);
         stopManagedStreamTimer();
         managedStreamFinalized = true;
         const spliced = managedStreamEnvelope.splice(attempt.rawBody);
@@ -545,7 +581,7 @@ export function createProtocolProxyRuntime({
         return endResponseAndWait(response);
       };
       const closeManagedStreamForError = async () => {
-        if (!managedStreamEnvelope || managedStreamFinalized) return;
+        if (!managedStreamStarted || managedStreamFinalized) return;
         stopManagedStreamTimer();
         managedStreamFinalized = true;
         await enqueueManagedStreamChunk(managedStreamEnvelope.stop());
@@ -560,7 +596,7 @@ export function createProtocolProxyRuntime({
         if (!route.transparentToolPassthrough) return null;
         return {
           shouldCommit(_snapshot, semanticMetrics) {
-            if (managedStreamEnvelope) return false;
+            if (managedStreamStarted) return false;
             return (semanticMetrics?.toolCallCount || 0) > 0;
           },
           async start({ status, headers, bufferedBody, semanticMetrics }) {
@@ -633,14 +669,15 @@ export function createProtocolProxyRuntime({
           ...(traceEnabled ? { onChunk(snapshot) { requestLogger.trace('upstream_chunk', { ...snapshot, phase }); } } : {}),
           ...(debugEnabled ? { onState(snapshot) { requestLogger.debug('request_state_changed', { ...snapshot, phase }); } } : {}),
           onManagedProgress(event) {
-            metrics.managedWebToolItemsCompletedTotal += 1;
-            requestLogger.info('managed_tool_item_completed', {
+            const completed = event.phase !== 'started';
+            if (completed) metrics.managedWebToolItemsCompletedTotal += 1;
+            requestLogger.info(completed ? 'managed_tool_item_completed' : 'managed_tool_item_started', {
               attempt: attemptNumber,
               phase,
               kind: event.kind || null,
               toolUseId: event.toolUseId || null,
               toolName: event.toolName || null,
-              ok: event.ok !== false,
+              ...(completed ? { ok: event.ok !== false } : {}),
               completed: event.completed ?? null,
               total: event.total ?? null,
               durationMs: event.durationMs ?? null,
@@ -651,7 +688,7 @@ export function createProtocolProxyRuntime({
               const progress = { ...snapshot, phase };
               emitToolGrowthWarnings(snapshot, attemptNumber, phase);
               if (debugEnabled) requestLogger.debug('request_progress', progress);
-              if (!warnEnabled || managedStreamEnvelope) return;
+              if (!warnEnabled || managedStreamStarted) return;
               const now = performance.now();
               if (snapshot.lastUpstreamActivityMs >= config.progressStallWarningMs && now - lastTransportWarningAtMono >= config.progressStallWarningMs) {
                 lastTransportWarningAtMono = now;

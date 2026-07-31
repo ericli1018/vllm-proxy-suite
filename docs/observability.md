@@ -519,6 +519,82 @@ These diagnostics contain tool names and counts only; Tool schemas and generated
 
 
 
+## Claude Code request tools and Action-Intent Guard
+
+At debug level, every guarded `/v1/messages` request emits a schema-free comparison after request preparation:
+
+```text
+request_tool_context
+incomingToolCount=...
+incomingToolNames=[...]
+incomingToolChoice="auto|any|none|tool:<name>"
+incomingToolsEnabled=true|false
+upstreamToolCount=...
+upstreamToolNames=[...]
+upstreamToolChoice="auto|any|none|tool:<name>"
+upstreamToolsEnabled=true|false
+toolSetPreserved=true|false
+latestInputKind="user|tool_result|assistant|none"
+latestInputTextChars=...
+explicitContinueDetected=true|false
+```
+
+No Tool schema, arguments, prompt text, or generated text is logged.
+
+When a terminal Anthropic response announces immediate execution but has no Tool Call:
+
+```text
+action_intent_without_tool_call_detected
+attempt=1
+phase="initial"
+retryable=true
+
+recovery_request_built
+recoveryMode="action_required"
+recoveryToolCount=...
+recoveryToolNames=[...]
+forcedToolChoice="any"
+parallelToolCallsDisabled=true
+```
+
+If the one Recovery does not produce a Tool Call after narration:
+
+```text
+action_intent_without_tool_call_fused
+attempt=2
+phase="recovery"
+retryable=false
+recoveryFailureKind="invalid|loop|interrupted|http_error"
+recoveryFailureReason="thinking_without_output|..."
+```
+
+For any initial Thinking-only terminal response, Output-Required Recovery logs include:
+
+```text
+recovery_request_built
+recoveryMode="output_required"
+recoveryOriginReason="thinking_without_output"
+recoveryToolChoice="auto|any|none|tool:<name>"
+forcedToolChoice=false
+```
+
+A valid user-facing text response or Tool Call completes Recovery. If the second Attempt is still Thinking-only:
+
+```text
+thinking_without_output_fused
+attempt=2
+phase="recovery"
+retryable=false
+```
+
+Prometheus counters:
+
+```text
+vllm_cc_proxy_action_intent_without_tool_call_detected_total
+vllm_cc_proxy_action_intent_recoveries_fused_total
+vllm_cc_proxy_thinking_without_output_recoveries_fused_total
+```
+
 ## Responses Hosted Tool and malformed-tool diagnostics
 
 When `chat_adapter` drops optional Hosted Tools:

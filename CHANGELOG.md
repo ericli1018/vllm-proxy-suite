@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.5 - 2026-07-31
+
+- Split Anthropic semantic Recovery into `output_required` and `action_required` modes.
+- `thinking_without_output` now preserves the original Anthropic Tool choice; an incoming `tool_choice={type:"auto"}` remains `auto` and the model may answer, explain, plan, report completion, wait for confirmation, ask one blocking question, or call a Tool.
+- Removed the v0.7.4 special case that promoted short `繼續`/`開始`/`proceed` inputs into forced `tool_choice={type:"any"}` Recovery.
+- Kept forced Tool Recovery only for `action_intent_without_tool_call`, where the model has already emitted a conservative first-person immediate-action narration while enabled tools are available.
+- Added a bounded output-only fuse: a second reasoning-only result remains `thinking_without_output` with `retryable:false`, preventing Claude Code retry cascades without forcing an unrelated Tool Call.
+- Added focused regressions for user-facing text after Thinking-only Recovery and repeated empty-output fusion.
+
+## 0.7.4 - 2026-07-31
+
+- Added an Anthropic/Claude Code Action-Intent Guard for terminal `end_turn` responses that announce immediate execution but emit no `tool_use` block while tools are available.
+- Added conservative Traditional Chinese and English recognition for immediate forms including `我開始執行`, `我繼續執行`, `I am starting`, and `I will continue`, while preserving generic plans and completed final answers.
+- Added one bounded action-required Recovery that preserves all Claude Code tools, sets Anthropic `tool_choice={type:"any",disable_parallel_tool_use:true}`, discards narration, and requests an immediate Tool Call.
+- Added a strict Recovery fuse: text-only, thinking-only, malformed, interrupted, or otherwise non-tool Recovery results preserve the originating guarded reason and become `retryable:false`, preventing Claude Code API retry cascades.
+- Added explicit continuation handling: short latest-user commands such as `繼續`, `開始`, `proceed`, and `go ahead` convert an initial `thinking_without_output` into one Action-Required Recovery when tools are available.
+- Added schema-free incoming/upstream Tool diagnostics, Recovery diagnostics, dedicated lifecycle events, and Prometheus counters.
+- Added `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED`, v0.7.4 focused regressions, deployment validation, and documentation.
+- Extracted the immediate action-narration and explicit-continuation classifiers into protocol-neutral core modules and retained the existing OpenAI Responses behavior.
+
 ## 0.7.3 - 2026-07-31
 
 - Replaced blank zero-width Claude Code progress bullets with visible Managed WebSearch/WebFetch status text. WebSearch displays a sanitized bounded query; WebFetch displays hostname only.

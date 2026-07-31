@@ -89,6 +89,27 @@ Tool classification does not depend on fixed product names. Explicit exact-name 
 
 When no usable network tool is identified, Recovery preserves the original tool set and does not invent a function name. This Recovery logic applies only before an OpenAI Tool Call is committed.
 
+## Claude Code action-intent recovery
+
+This policy exists only in the Anthropic service and uses the same single Recovery slot as other guarded failures.
+
+An initial response is classified as `action_intent_without_tool_call` only when all conditions hold:
+
+- the request exposes at least one Tool and Tool choice is not `none`;
+- the Anthropic message terminates with `stop_reason="end_turn"`;
+- no `tool_use` block exists;
+- visible text is a conservative first-person immediate-action statement.
+
+Generic plans, procedural explanations, completed final answers, and explicit confirmation boundaries remain valid.
+
+The initial narration is discarded. Recovery preserves the original Tool set, sets `tool_choice={type:"any",disable_parallel_tool_use:true}`, lowers sampling through the common Recovery caps, and instructs the model to produce a Tool Call without another narration-only response.
+
+`thinking_without_output` does not imply that the task requires a Tool. It enters a separate Output-Required Recovery that preserves the prepared Anthropic request and its original Tool choice. In particular, `tool_choice={type:"auto"}` remains `auto`; short user continuations such as `繼續`, `開始`, `proceed`, or `go ahead` do not promote it to `any`.
+
+The Output-Required instruction permits a user-facing answer, explanation, plan, completion report, confirmation boundary, one genuinely blocking question, or a Tool Call when external action is actually necessary. It only forbids another reasoning-only terminal response. A second `thinking_without_output` is fused as the same reason with `retryable=false`, while a valid text response is delivered normally.
+
+Action-Required Recovery remains exclusive to `action_intent_without_tool_call`. If that Recovery does not produce a Tool Call, every failure shape is fused with `retryable=false` and the originating reason remains `action_intent_without_tool_call`. The Proxy performs no third Attempt and does not delegate the same semantic retry to Claude Code.
+
 ## Claude Code file-tool recovery
 
 This policy exists only in the Anthropic service. `tools[]` and `input_schema` are runtime authority.

@@ -288,3 +288,18 @@ test('Responses actionless recovery is fused after one required-tool attempt', a
   assert.equal(runtime.metrics.actionlessCompletionsDetectedTotal, 2);
   assert.equal(runtime.metrics.actionlessRecoveriesFusedTotal, 1);
 });
+
+test('actionless guard recognizes immediate start and continue execution narration', () => {
+  for (const text of [
+    '好的，我開始執行階段 1。先查看當前目錄結構。',
+    '我繼續執行，先檢查目前狀態。',
+  ]) {
+    const validation = detectActionlessCompletion({
+      requestBody: { tools: responsesTools, tool_choice: 'auto' },
+      output: narration(text),
+      completion: completedDiagnostics(),
+      recovery: false,
+    });
+    assert.equal(validation.reason, 'actionless_completion');
+  }
+});

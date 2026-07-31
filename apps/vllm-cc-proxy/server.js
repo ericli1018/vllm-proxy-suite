@@ -9,6 +9,15 @@ import {
 } from '../../packages/anthropic/claude-code-tools/recovery.js';
 import { createProtocolProxyRuntime } from '../../packages/server/create-proxy-server.js';
 import { createAnthropicManagedWebToolsFetch } from '../../packages/anthropic/managed-web-tools.js';
+import {
+  buildAnthropicActionRequiredRecovery,
+  buildAnthropicOutputRequiredRecovery,
+  detectAnthropicActionIntentWithoutToolCall,
+  summarizeAnthropicExecutionContext,
+  summarizeAnthropicToolContext,
+  validateAnthropicActionRequiredRecovery,
+  validateAnthropicOutputRequiredRecovery,
+} from '../../packages/anthropic/action-intent.js';
 
 function positiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -36,6 +45,7 @@ export function loadAnthropicConfig(env = process.env) {
     defaultEnableThinking: parseBoolean(env.DEFAULT_ENABLE_THINKING, true),
     defaultMaxTokens: positiveInteger(env.DEFAULT_MAX_TOKENS, 8192),
     claudeCodeToolRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_RECOVERY_ENABLED, true),
+    claudeCodeActionIntentGuardEnabled: parseBoolean(env.CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED, true),
     claudeCodeEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_EDIT_RECOVERY_ENABLED, true),
     claudeCodeWriteRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_WRITE_RECOVERY_ENABLED, true),
     claudeCodeNotebookEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED, true),
@@ -95,14 +105,94 @@ export function createAnthropicGuardedRoute(config, options = {}) {
     prepareRequest(body) {
       return applyAnthropicRequestPolicy(body, config);
     },
-    validateAttempt(attempt, { originalBody }) {
-      return analyzeClaudeCodeToolAttempt({
+    requestDiagnostics(body, { originalBody }) {
+      const incoming = summarizeAnthropicToolContext(originalBody);
+      const upstream = summarizeAnthropicToolContext(body);
+      const execution = summarizeAnthropicExecutionContext(originalBody);
+      return {
+        ...execution,
+        incomingToolCount: incoming.requestToolCount,
+        incomingToolNames: incoming.requestToolNames,
+        incomingToolChoice: incoming.requestToolChoice,
+        incomingToolsEnabled: incoming.requestToolsEnabled,
+        upstreamToolCount: upstream.requestToolCount,
+        upstreamToolNames: upstream.requestToolNames,
+        upstreamToolChoice: upstream.requestToolChoice,
+        upstreamToolsEnabled: upstream.requestToolsEnabled,
+        toolSetPreserved: JSON.stringify(incoming.requestToolNames) === JSON.stringify(upstream.requestToolNames),
+      };
+    },
+    validateAttempt(attempt, { originalBody, firstBody, recovery = false }) {
+      const output = anthropicMessagesAdapter.extractOutput(attempt.result);
+      const toolValidation = analyzeClaudeCodeToolAttempt({
         request: originalBody,
-        output: anthropicMessagesAdapter.extractOutput(attempt.result),
+        output,
         config,
       });
+      if (!toolValidation.ok) return toolValidation;
+      if (!config.claudeCodeActionIntentGuardEnabled) return { ok: true };
+      return detectAnthropicActionIntentWithoutToolCall({
+        requestBody: firstBody || originalBody,
+        output,
+        completion: anthropicMessagesAdapter.completionDiagnostics(attempt.result),
+        recovery,
+      });
+    },
+    classifyAttempt(attempt, { phase, recovery }) {
+      if (
+        phase !== 'recovery'
+        || !['action_required', 'output_required'].includes(recovery?.plan?.mode)
+        || attempt.kind === 'success'
+        || attempt.kind === 'tool_passthrough'
+      ) return attempt;
+
+      const actionRequired = recovery.plan.mode === 'action_required';
+      if (!actionRequired && attempt.reason !== 'thinking_without_output') return attempt;
+
+      const originReason = recovery.plan.originReason
+        || (actionRequired ? 'action_intent_without_tool_call' : 'thinking_without_output');
+      return {
+        ...attempt,
+        kind: 'invalid',
+        reason: originReason,
+        detail: actionRequired
+          ? 'The action-required Recovery ended without a Tool Call.'
+          : 'The output-required Recovery ended without visible output or a Tool Call.',
+        retryable: false,
+        diagnostics: {
+          ...(attempt.diagnostics || {}),
+          requestToolCount: recovery.plan.candidateNames?.length || 0,
+          requestToolNames: recovery.plan.candidateNames || [],
+          ...(actionRequired
+            ? { actionIntentRecoveryAttempted: true }
+            : { outputRecoveryAttempted: true }),
+          recoveryOriginReason: originReason,
+          recoveryFailureKind: attempt.kind,
+          recoveryFailureReason: attempt.reason || attempt.loopInfo?.reason || 'recovery_failed',
+        },
+      };
     },
     buildRecovery({ originalBody, firstBody, reason }) {
+      const toolContext = summarizeAnthropicToolContext(originalBody);
+      const actionRequired = config.claudeCodeActionIntentGuardEnabled
+        && toolContext.requestToolsEnabled
+        && reason?.reason === 'action_intent_without_tool_call';
+      if (actionRequired) {
+        return buildAnthropicActionRequiredRecovery({
+          original: originalBody,
+          prepared: firstBody || applyAnthropicRequestPolicy(originalBody, config),
+          issue: reason,
+          config,
+        });
+      }
+      if (reason?.reason === 'thinking_without_output') {
+        return buildAnthropicOutputRequiredRecovery({
+          original: originalBody,
+          prepared: firstBody || applyAnthropicRequestPolicy(originalBody, config),
+          issue: reason,
+          config,
+        });
+      }
       if (reason?.context && config.claudeCodeToolRecoveryEnabled) {
         return buildClaudeCodeToolRecovery({
           original: originalBody,
@@ -115,10 +205,14 @@ export function createAnthropicGuardedRoute(config, options = {}) {
     },
     validateRecovery(attempt, recovery) {
       if (!recovery.plan) return { ok: true };
-      return validateClaudeCodeToolRecovery(
-        anthropicMessagesAdapter.extractOutput(attempt.result),
-        recovery.plan,
-      );
+      const output = anthropicMessagesAdapter.extractOutput(attempt.result);
+      if (recovery.plan.mode === 'action_required') {
+        return validateAnthropicActionRequiredRecovery(output, recovery.plan);
+      }
+      if (recovery.plan.mode === 'output_required') {
+        return validateAnthropicOutputRequiredRecovery(output, recovery.plan);
+      }
+      return validateClaudeCodeToolRecovery(output, recovery.plan);
     },
     observeAttempt({ attempt, metrics, logger, attemptNumber, phase }) {
       const uses = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-websearch-uses') || '0', 10) || 0;
@@ -152,7 +246,7 @@ export function createAnthropicGuardedRoute(config, options = {}) {
   };
 }
 
-function anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true }) {
+function anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true, logSink }) {
   const managedFetchImpl = (config.managedWebSearchEnabled || config.managedWebFetchEnabled)
     ? createAnthropicManagedWebToolsFetch(fetchImpl, config)
     : null;
@@ -162,6 +256,7 @@ function anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true
     config,
     fetchImpl,
     exposeControlRoutes,
+    logSink,
     guardedRoutes: new Map([[
       '/v1/messages',
       createAnthropicGuardedRoute(config, { fetchImpl: managedFetchImpl }),
@@ -175,6 +270,6 @@ function anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes = true
   };
 }
 
-export function createAnthropicProxyRuntime({ env = process.env, config = loadAnthropicConfig(env), fetchImpl = globalThis.fetch, exposeControlRoutes = true } = {}) {
-  return createProtocolProxyRuntime(anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes }));
+export function createAnthropicProxyRuntime({ env = process.env, config = loadAnthropicConfig(env), fetchImpl = globalThis.fetch, exposeControlRoutes = true, logSink } = {}) {
+  return createProtocolProxyRuntime(anthropicRuntimeOptions({ config, fetchImpl, exposeControlRoutes, logSink }));
 }

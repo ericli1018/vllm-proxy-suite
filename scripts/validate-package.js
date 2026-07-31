@@ -15,6 +15,8 @@ const required = [
   'apps/vllm-cc-proxy/server.js',
   'apps/vllm-openai-proxy/server.js',
   'packages/core/attempt-runner.js',
+  'packages/core/action-narration.js',
+  'packages/core/execution-instruction.js',
   'packages/core/buffer-budget.js',
   'packages/core/config.js',
   'packages/core/json-diagnostics.js',
@@ -23,6 +25,7 @@ const required = [
   'packages/core/sse.js',
   'packages/core/tool-correlation.js',
   'packages/anthropic/messages.js',
+  'packages/anthropic/action-intent.js',
   'packages/anthropic/managed-websearch.js',
   'packages/anthropic/managed-web-tools.js',
   'packages/anthropic/stream-envelope.js',
@@ -50,6 +53,7 @@ const required = [
   'test/anthropic-webfetch-bridge-integration-v070.test.js',
   'test/anthropic-managed-stream-envelope-v072.test.js',
   'test/anthropic-managed-visible-progress-v073.test.js',
+  'test/anthropic-action-intent-v074.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -74,7 +78,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.3') errors.push('package.json version must be 0.7.3');
+if (packageJson.version !== '0.7.5') errors.push('package.json version must be 0.7.5');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -118,6 +122,7 @@ if (!compose.includes('${VLLM_PROXY_RESPONSES_HOSTED_TOOL_POLICY:-drop_optional}
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RETRY_ENABLED')) errors.push('Compose must expose malformed required-tool retry switch');
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS')) errors.push('Compose must expose malformed-tool minimum token budget');
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX')) errors.push('Compose must expose malformed-tool recovery temperature cap');
+if (!compose.includes('CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED')) errors.push('Compose must expose the Claude Code Action-Intent guard switch');
 if (!compose.includes('CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED')) errors.push('Compose must expose the Claude Code WebSearch bridge switch');
 if (!compose.includes('SEARXNG_BASE_URL')) errors.push('Compose must expose the SearXNG base URL');
 if (!compose.includes('SEARXNG_MAX_USES')) errors.push('Compose must expose the SearXNG use limit');
@@ -157,6 +162,10 @@ if (!anthropicRuntime.includes('createAnthropicManagedWebToolsFetch')) errors.pu
 if (!anthropicRuntime.includes('managed_websearch_completed')) errors.push('Anthropic runtime must observe managed WebSearch lifecycle');
 if (!anthropicRuntime.includes('managed_webfetch_completed')) errors.push('Anthropic runtime must observe managed WebFetch lifecycle');
 if (!anthropicRuntime.includes('managedStreamEnvelopeEnabled')) errors.push('Anthropic runtime must enable managed stream envelopes');
+if (!anthropicRuntime.includes('detectAnthropicActionIntentWithoutToolCall')) errors.push('Anthropic runtime must enable Action-Intent detection');
+if (!anthropicRuntime.includes('buildAnthropicActionRequiredRecovery')) errors.push('Anthropic runtime must enable Action-Intent Recovery');
+if (!anthropicRuntime.includes('buildAnthropicOutputRequiredRecovery')) errors.push('Anthropic runtime must enable output-required Recovery');
+if (!anthropicRuntime.includes('validateAnthropicOutputRequiredRecovery')) errors.push('Anthropic runtime must validate output-required Recovery');
 
 
 const managedStreamEnvelope = readFileSync(resolve(root, 'packages/anthropic/stream-envelope.js'), 'utf8');

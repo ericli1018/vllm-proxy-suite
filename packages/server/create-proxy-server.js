@@ -44,6 +44,9 @@ function createMetrics() {
     toolPassthroughValidationWarningsTotal: 0,
     actionlessCompletionsDetectedTotal: 0,
     actionlessRecoveriesFusedTotal: 0,
+    actionIntentWithoutToolCallDetectedTotal: 0,
+    actionIntentRecoveriesFusedTotal: 0,
+    thinkingWithoutOutputRecoveriesFusedTotal: 0,
     hostedToolsFilteredTotal: 0,
     requiredHostedToolsRejectedTotal: 0,
     malformedToolRetriesTotal: 0,
@@ -458,10 +461,25 @@ export function createProtocolProxyRuntime({
         config,
       });
       const recordActionlessCompletion = (validation, attemptNumber, recovery) => {
-        if (validation?.reason !== 'actionless_completion') return;
-        metrics.actionlessCompletionsDetectedTotal += 1;
-        if (recovery) metrics.actionlessRecoveriesFusedTotal += 1;
-        requestLogger.warn(recovery ? 'actionless_completion_fused' : 'actionless_completion_detected', {
+        if (!['actionless_completion', 'action_intent_without_tool_call', 'thinking_without_output'].includes(validation?.reason)) return;
+        const anthropicActionIntent = validation.reason === 'action_intent_without_tool_call';
+        const thinkingWithoutOutput = validation.reason === 'thinking_without_output';
+        if (thinkingWithoutOutput && !recovery) return;
+        if (thinkingWithoutOutput) {
+          metrics.thinkingWithoutOutputRecoveriesFusedTotal += 1;
+        } else if (anthropicActionIntent) {
+          metrics.actionIntentWithoutToolCallDetectedTotal += 1;
+          if (recovery) metrics.actionIntentRecoveriesFusedTotal += 1;
+        } else {
+          metrics.actionlessCompletionsDetectedTotal += 1;
+          if (recovery) metrics.actionlessRecoveriesFusedTotal += 1;
+        }
+        const event = thinkingWithoutOutput
+          ? 'thinking_without_output_fused'
+          : (anthropicActionIntent
+            ? (recovery ? 'action_intent_without_tool_call_fused' : 'action_intent_without_tool_call_detected')
+            : (recovery ? 'actionless_completion_fused' : 'actionless_completion_detected'));
+        requestLogger.warn(event, {
           attempt: attemptNumber,
           phase: recovery ? 'recovery' : 'initial',
           retryable: validation.retryable ?? !recovery,
@@ -716,13 +734,14 @@ export function createProtocolProxyRuntime({
         managedProgress: deliverManagedProgress,
       };
 
-      const finalizeRouteAttempt = (attempt, attemptNumber, phase) => {
+      const finalizeRouteAttempt = (attempt, attemptNumber, phase, recovery = null) => {
         const classified = route.classifyAttempt?.(attempt, {
           attemptNumber,
           phase,
           metrics,
           logger: requestLogger,
           config,
+          recovery,
         }) || attempt;
         route.observeAttempt?.({
           attempt: classified,
@@ -809,7 +828,10 @@ export function createProtocolProxyRuntime({
           attemptNumber: 2,
           toolPassthrough: createToolPassthrough(2, 'recovery'),
         });
-        attempt = finalizeRouteAttempt(attempt, 2, 'recovery');
+        attempt = finalizeRouteAttempt(attempt, 2, 'recovery', recovery);
+        if (attempt.kind !== 'success' && attempt.kind !== 'tool_passthrough' && ['action_intent_without_tool_call', 'thinking_without_output'].includes(attempt.reason)) {
+          recordActionlessCompletion(attempt, 2, true);
+        }
         if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateAttempt) {
           const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody: recovery.body, config, recovery: true });
           if (!semanticValidation.ok) {

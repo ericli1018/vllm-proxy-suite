@@ -21,7 +21,8 @@
 19. Custom Tool freeform input is wrapped in a Chat JSON argument named `__arg1`. The Responses Tool boundary is announced immediately, but full freeform input remains available only when the Chat arguments are complete.
 20. The malformed required-tool retry is heuristic and limited to one extra Chat upstream call. It can reduce parser failures but cannot guarantee that the model chooses the correct tool or produces semantically correct arguments.
 21. `required_on_explicit_continue` recognizes only short explicit execution commands. It intentionally does not classify general task prompts, and `tool_choice=required` still cannot guarantee semantically correct tool selection or arguments.
-22. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
+22. Anthropic `thinking_without_output` Recovery preserves the request Tool choice and permits text or Tool output. This avoids forced irrelevant tools, but the model may still choose narration or a clarification instead of the external action the user intended unless the Action-Intent Guard independently matches its visible output.
+23. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
 
 ## Think Loop heuristic
 

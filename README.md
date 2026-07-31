@@ -609,6 +609,54 @@ RECOVERY_NETWORK_HYBRID_TOOL_NAMES='browser_agent'
 - 移除 vLLM Anthropic schema 不接受的 generation 擴充欄位。
 - `model` 原樣保留。
 
+## Claude Code Action-Intent Guard
+
+此 Guard 與 Think Loop、Claude Code 檔案 Tool Recovery 分離，只處理以下完整條件：
+
+```text
+stop_reason="end_turn"
+request tools[] 非空
+tool_choice 不是 none
+回應沒有 tool_use
+可見文字是第一人稱立即執行宣告
+```
+
+典型命中內容包括：
+
+```text
+好的，我開始執行階段 1。先查看當前目錄結構。
+我繼續執行，先檢查目前狀態。
+I am starting the implementation now.
+Let me inspect the workspace first.
+```
+
+初次命中時，Proxy 丟棄整份 narration Attempt，只使用既有單一 Recovery slot：
+
+```text
+保留原 tools[]
+tool_choice={type:"any",disable_parallel_tool_use:true}
+要求立即產生 Tool Call
+禁止再次只輸出進度宣告
+```
+
+若 Action-Required Recovery 仍沒有 Tool Call，包括只剩 Thinking、只輸出文字、格式錯誤或 upstream 中斷，Proxy 會在單一 Recovery slot 後熔斷：
+
+```text
+reason="action_intent_without_tool_call"
+retryable=false
+```
+
+`thinking_without_output` 使用另一條 **Output-Required Recovery**，不代表本回合一定需要工具：
+
+```text
+保留原 tools[]
+保留原 tool_choice；auto 仍為 auto
+允許正常回答、解釋、規劃、完成報告、等待確認、必要提問或 Tool Call
+禁止再次只輸出 Thinking
+```
+
+因此短指令 `繼續`、`開始`、`proceed` 或 `go ahead` 不會再單獨觸發強制 Tool Call。若第二次仍只有 Thinking，Proxy 保留 `reason="thinking_without_output"` 並回傳 `retryable=false`，避免 Claude Code 反覆重送；若 Recovery 產生有效可見文字，則正常交付給使用者。一般規劃、步驟說明、完成報告與等待使用者確認均屬合法文字輸出。可用 `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED=false` 停用 Action-Intent Guard；Output-Required Recovery 仍屬通用輸出完整性處理。
+
 ## Claude Code Tool Recovery
 
 Anthropic runtime 以本次 request 的 `tools[]` 與 `input_schema` 為執行期權威，處理：
@@ -730,6 +778,7 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | 變數 | 預設 |
 |---|---:|
 | `CLAUDE_CODE_TOOL_RECOVERY_ENABLED` | `true` |
+| `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED` | `true`；阻擋立即行動宣告後無 Tool Call 的 `end_turn` |
 | `CLAUDE_CODE_EDIT_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_WRITE_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED` | `true` |

@@ -191,7 +191,7 @@ Proxy 不改寫 `model`，名稱必須與 vLLM `--served-model-name` 一致。
 
 ### Claude Code Managed WebSearch／WebFetch
 
-v0.7.1 提供 opt-in Managed Web Tools Layer。單一受管理工具與**同類型平行批次**都由 Proxy 攔截；`WebSearch + WebSearch` 或 `WebFetch + WebFetch` 進入有界內部隊列，混合 Managed/Client Tools 仍整份原樣交回 Claude Code。
+v0.7.2 提供 opt-in Managed Web Tools Layer。單一受管理工具與**同類型平行批次**都由 Proxy 攔截；`WebSearch + WebSearch` 或 `WebFetch + WebFetch` 進入有界內部隊列，混合 Managed/Client Tools 仍整份原樣交回 Claude Code。
 
 ```text
 WebSearch
@@ -229,12 +229,14 @@ Managed WebSearch continuation、WebFetch Chunk Reader、Document Synthesizer �
 ```text
 assistant: WebSearch A + WebSearch B + WebSearch C
 → Proxy queue，最多 WEBSEARCH_MAX_PARALLEL 筆同時執行
-→ 任一項完成即記錄結果並立即向 Claude Code SSE stream 送出標準 ping
+→ Proxy 在 request 開始時立即建立正式 Anthropic message lifecycle
+→ 每 15 秒送出不可見但有效的 text_delta；任一項完成時再立即送一次
+→ 任一項完成即記錄結果，其他項目繼續執行
 → 其他項目繼續執行
 → 全部 tool_use_id 都有結果後，以單一 user tool_result turn 做 continuation
 ```
 
-`WebFetch` 使用相同排程，但每一項可能包含下載、Chunk Reader 與 Synthesizer，因此由 `WEBFETCH_MAX_PARALLEL` 獨立限制。完成事件不會把內部 `tool_result` 暴露給 Claude Code，也不會顯示成 `Search(...)` 工具列；SSE ping 的用途是立即產生有效網路進度、維持連線並重置 Proxy stall 計時。Anthropic Tool ID 配對要求所有同一 assistant turn 的結果齊備後才能安全 continuation。
+`WebFetch` 使用相同排程，但每一項可能包含下載、Chunk Reader 與 Synthesizer，因此由 `WEBFETCH_MAX_PARALLEL` 獨立限制。Proxy 不會把內部 `tool_result` 暴露給 Claude Code，也不會顯示成 `Search(...)` 工具列。Managed streaming 以單一 synthetic `message_start` 開啟，週期性輸出零寬 `text_delta`，最後將 vLLM SSE 的 content block index 整體平移並 splice 到同一 lifecycle；不再使用 pre-message `event: ping` 或 SSE comment。Anthropic Tool ID 配對仍要求同一 assistant turn 的所有結果齊備後才能安全 continuation。 因 synthetic `message_start` 必須在取得 upstream usage 前送出，Claude Code 端的 `usage.input_tokens` 會是 `0`；Proxy Log 仍保留 vLLM 最終回報的實際 token usage。
 
 啟用內建 SearXNG 與兩個 Bridge：
 
@@ -694,6 +696,7 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `CLAUDE_CODE_WEBFETCH_TOOL_NAMES` | `WebFetch` |
 | `MANAGED_WEB_TOOLS_THINK` | `false`；Managed Search/Fetch 內部 vLLM request 使用 `think:false` |
 | `MANAGED_WEB_TOOLS_MAX_BATCH` | `8`；單一 assistant turn 可由 Proxy 管理的同類工具上限，超出項目回內部 error result |
+| `MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS` | `15000`；Managed Anthropic stream 有效 `text_delta` 週期，防止 Claude Code idle watchdog |
 | `WEBSEARCH_MAX_PARALLEL` | `2`；WebSearch 隊列最大同時執行數 |
 | `WEBFETCH_MAX_PARALLEL` | `2`；WebFetch 文件工作最大同時執行數 |
 | `WEBFETCH_TIMEOUT_MS` | `20000` |

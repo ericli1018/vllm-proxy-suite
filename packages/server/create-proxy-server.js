@@ -58,6 +58,8 @@ function createMetrics() {
     managedWebFetchChunksTotal: 0,
     managedWebToolItemsCompletedTotal: 0,
     managedWebToolProgressPingsTotal: 0,
+    managedStreamProgressDeltasTotal: 0,
+    managedStreamSplicesTotal: 0,
   };
 }
 
@@ -337,6 +339,10 @@ export function createProtocolProxyRuntime({
     };
     request.once('aborted', onAbort);
     response.once('close', () => { if (!response.writableFinished) onAbort(); });
+    let activeStopManagedStreamTimer = () => {};
+    let activeCloseManagedStreamForError = async () => {};
+    let activeStreaming = false;
+    let activeRoute = selectedRoute || null;
 
     try {
       if (!guardedRoutes.has(path)) {
@@ -463,31 +469,98 @@ export function createProtocolProxyRuntime({
         });
       };
       const streaming = Boolean(firstBody.stream);
-      const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
-      let managedProgressWrite = Promise.resolve();
+      const managedStreamEnvelope = streaming && route.managedStreamEnvelopeEnabled
+        ? route.adapter.managedStreamEnvelope
+        : null;
+      let managedStreamWrite = Promise.resolve();
+      let managedStreamTimer = null;
+      let managedStreamFinalized = false;
+      const enqueueManagedStreamChunk = (chunk, { progress = false, itemProgress = false } = {}) => {
+        managedStreamWrite = managedStreamWrite.then(async () => {
+          if (response.destroyed || response.writableEnded) return false;
+          await writeResponseChunk(response, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          if (progress) metrics.managedStreamProgressDeltasTotal += 1;
+          if (itemProgress) metrics.managedWebToolProgressPingsTotal += 1;
+          return true;
+        }).catch((error) => {
+          if (!response.destroyed && !response.writableEnded) {
+            requestLogger.warn('managed_stream_write_failed', { reason: error instanceof Error ? error.message : String(error) });
+          }
+          return false;
+        });
+        return managedStreamWrite;
+      };
+      const stopManagedStreamTimer = () => {
+        if (managedStreamTimer) clearInterval(managedStreamTimer);
+        managedStreamTimer = null;
+      };
+      if (managedStreamEnvelope) {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache, no-store',
+          connection: 'keep-alive',
+          'x-accel-buffering': 'no',
+        });
+        response.flushHeaders?.();
+        await enqueueManagedStreamChunk(managedStreamEnvelope.start({
+          requestId,
+          model: firstBody.model || originalBody.model || 'managed-web-tools',
+        }), { progress: true });
+        requestLogger.info('managed_stream_started', {
+          progressIntervalMs: config.managedWebStreamProgressIntervalMs,
+        });
+        managedStreamTimer = setInterval(() => {
+          void enqueueManagedStreamChunk(managedStreamEnvelope.progress(), { progress: true });
+        }, config.managedWebStreamProgressIntervalMs);
+        managedStreamTimer.unref?.();
+      }
+      const heartbeat = streaming && !managedStreamEnvelope ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
       const deliverManagedProgress = streaming
         ? (event = {}) => {
-          managedProgressWrite = managedProgressWrite.then(async () => {
-            if (response.destroyed || response.writableEnded) return;
-            if (!response.headersSent) {
-              response.writeHead(200, {
-                'content-type': 'text/event-stream; charset=utf-8',
-                'cache-control': 'no-cache, no-store',
-                connection: 'keep-alive',
-                'x-accel-buffering': 'no',
-              });
-            }
-            await writeResponseChunk(response, Buffer.from('event: ping\ndata: {"type":"ping"}\n\n'));
-            metrics.managedWebToolProgressPingsTotal += 1;
-          });
-          return managedProgressWrite;
+          if (managedStreamEnvelope) {
+            return enqueueManagedStreamChunk(managedStreamEnvelope.progress(), { progress: true, itemProgress: true });
+          }
+          if (response.destroyed || response.writableEnded) return Promise.resolve(false);
+          if (!response.headersSent) {
+            response.writeHead(200, {
+              'content-type': 'text/event-stream; charset=utf-8',
+              'cache-control': 'no-cache, no-store',
+              connection: 'keep-alive',
+              'x-accel-buffering': 'no',
+            });
+          }
+          metrics.managedWebToolProgressPingsTotal += 1;
+          return writeResponseChunk(response, Buffer.from('event: ping\ndata: {"type":"ping"}\n\n'));
         }
         : null;
+      const sendManagedSuccess = async (attempt) => {
+        if (!managedStreamEnvelope) return sendBufferedSuccess(response, attempt);
+        stopManagedStreamTimer();
+        managedStreamFinalized = true;
+        const spliced = managedStreamEnvelope.splice(attempt.rawBody);
+        await enqueueManagedStreamChunk(spliced);
+        await managedStreamWrite;
+        metrics.managedStreamSplicesTotal += 1;
+        requestLogger.info('managed_stream_splice_completed', { bytes: spliced.length });
+        return endResponseAndWait(response);
+      };
+      const closeManagedStreamForError = async () => {
+        if (!managedStreamEnvelope || managedStreamFinalized) return;
+        stopManagedStreamTimer();
+        managedStreamFinalized = true;
+        await enqueueManagedStreamChunk(managedStreamEnvelope.stop());
+        await managedStreamWrite;
+      };
+      activeStopManagedStreamTimer = stopManagedStreamTimer;
+      activeCloseManagedStreamForError = closeManagedStreamForError;
+      activeStreaming = streaming;
+      activeRoute = route;
       let toolPassthroughDelivery = null;
       const createToolPassthrough = (attemptNumber, phase) => {
         if (!route.transparentToolPassthrough) return null;
         return {
           shouldCommit(_snapshot, semanticMetrics) {
+            if (managedStreamEnvelope) return false;
             return (semanticMetrics?.toolCallCount || 0) > 0;
           },
           async start({ status, headers, bufferedBody, semanticMetrics }) {
@@ -578,7 +651,7 @@ export function createProtocolProxyRuntime({
               const progress = { ...snapshot, phase };
               emitToolGrowthWarnings(snapshot, attemptNumber, phase);
               if (debugEnabled) requestLogger.debug('request_progress', progress);
-              if (!warnEnabled) return;
+              if (!warnEnabled || managedStreamEnvelope) return;
               const now = performance.now();
               if (snapshot.lastUpstreamActivityMs >= config.progressStallWarningMs && now - lastTransportWarningAtMono >= config.progressStallWarningMs) {
                 lastTransportWarningAtMono = now;
@@ -688,6 +761,7 @@ export function createProtocolProxyRuntime({
             ...(error?.details || {}),
           });
           terminal('request_failed', { kind: 'recovery_build_failed', reason: error instanceof Error ? error.message : String(error) }, 'error');
+          await closeManagedStreamForError();
           return sendGuardedFailure({ response, route, streaming, status: 502, type: 'recovery_build_failed', message: error instanceof Error ? error.message : String(error), requestId, formatJsonError });
         }
         attempt = await performBufferedAttempt({
@@ -765,7 +839,7 @@ export function createProtocolProxyRuntime({
             streaming: false,
           });
           try {
-            await sendBufferedSuccess(response, attempt);
+            await sendManagedSuccess(attempt);
           } catch (error) {
             metrics.toolPassthroughInterruptionsTotal += 1;
             terminal('request_failed', { kind: 'tool_passthrough_delivery_failed', reason: error instanceof Error ? error.message : String(error), deliveryCommitted: false }, 'error');
@@ -824,7 +898,7 @@ export function createProtocolProxyRuntime({
         if (debugEnabled) requestLogger.debug('request_state_changed', { state: 'response_replaying', phase: 'delivery' });
         requestLogger[replayLevel]('response_replay_started', { bytes: attempt.rawBody?.length || 0, toolCallCount: toolCalls.length });
         try {
-          await sendBufferedSuccess(response, attempt);
+          await sendManagedSuccess(attempt);
         } catch (error) {
           metrics.responseReplayInterruptionsTotal += 1;
           terminal('request_failed', { kind: 'response_replay_interrupted', reason: error instanceof Error ? error.message : String(error) }, 'error');
@@ -873,6 +947,7 @@ export function createProtocolProxyRuntime({
         ...failureFields,
       }, 'error');
       const status = attempt.kind === 'http_error' && attempt.status < 500 ? attempt.status : 502;
+      await closeManagedStreamForError();
       return sendGuardedFailure({
         response,
         route,
@@ -887,9 +962,18 @@ export function createProtocolProxyRuntime({
     } catch (error) {
       terminal('request_failed', { kind: 'proxy_error', reason: error instanceof Error ? error.message : String(error) }, 'error');
       if (!clientController.signal.aborted) {
-        jsonResponse(response, 502, formatJsonError('proxy_error', error instanceof Error ? error.message : String(error), requestId));
+        await activeCloseManagedStreamForError();
+        if (activeStreaming && response.headersSent && activeRoute) {
+          await endResponseAndWait(response, activeRoute.adapter.streamError({
+            message: error instanceof Error ? error.message : String(error),
+            type: 'proxy_error', param: null, code: 'proxy_error', request_id: requestId,
+          })).catch(() => {});
+        } else {
+          jsonResponse(response, 502, formatJsonError('proxy_error', error instanceof Error ? error.message : String(error), requestId));
+        }
       }
     } finally {
+      activeStopManagedStreamTimer();
       if (!terminalEvent) {
         if (clientController.signal.aborted) terminal('request_cancelled', { reason: clientController.signal.reason || 'client_cancelled' }, 'warn');
         else terminal('request_failed', { kind: 'non_terminal_exit', reason: 'request exited without terminal state' }, 'error');

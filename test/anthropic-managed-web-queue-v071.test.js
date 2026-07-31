@@ -151,7 +151,7 @@ test('homogeneous parallel WebFetch calls remain proxy-managed and preserve tool
   assert.ok(vllmBodies.slice(1).every((body) => body.think === false && body.chat_template_kwargs.enable_thinking === false));
 });
 
-test('streaming gateway emits an Anthropic ping as soon as the first managed batch item completes', async (t) => {
+test('streaming gateway emits a managed Anthropic stream envelope before batch completion', async (t) => {
   let vllmCalls = 0;
   const config = { ...loadAnthropicConfig({
     PROXY_HOST: '127.0.0.1',
@@ -195,8 +195,9 @@ test('streaming gateway emits an Anthropic ping as soon as the first managed bat
   const reader = response.body.getReader();
   const first = await reader.read();
   const firstText = Buffer.from(first.value).toString('utf8');
-  assert.match(firstText, /event: ping/);
-  assert.match(firstText, /"type":"ping"/);
+  assert.match(firstText, /event: message_start/);
+  assert.match(firstText, /event: content_block_start/);
+  assert.match(firstText, /"type":"text_delta"/);
 
   const chunks = [firstText];
   while (true) {
@@ -209,6 +210,7 @@ test('streaming gateway emits an Anthropic ping as soon as the first managed bat
   assert.match(metrics, /vllm_cc_proxy_managed_web_search_executions_total 2/);
   assert.match(metrics, /vllm_cc_proxy_managed_web_tool_items_completed_total 2/);
   assert.match(metrics, /vllm_cc_proxy_managed_web_tool_progress_pings_total 2/);
+  assert.match(metrics, /vllm_cc_proxy_managed_stream_splices_total 1/);
 });
 
 test('Anthropic config exposes managed batch and bounded parallel queue defaults', () => {

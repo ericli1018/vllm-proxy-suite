@@ -584,26 +584,30 @@ total=3
 durationMs=...
 ```
 
-No query, URL, snippet, fetched page, or Tool Result content is logged. For a streaming Claude Code request, the same completion immediately sends:
+No query, URL, snippet, fetched page, or Tool Result content is logged. When either Managed Web bridge is enabled, a streaming request immediately begins one valid Anthropic lifecycle:
 
 ```text
-event: ping
-data: {"type":"ping"}
+event: message_start
+event: content_block_start   # progress block index 0
+event: content_block_delta   # invisible zero-width text delta
 ```
 
-The ping is protocol-valid transport progress. It keeps the downstream stream active and resets `lastUpstreamActivityMs` / `lastSemanticActivityMs`, but it does not expose an internal Tool Call or render a Claude Code `Search(...)` row. Final model continuation begins only after all Tool Results from that assistant turn are available and correlated by their original `tool_use_id`.
+The Proxy sends another valid `content_block_delta` every `MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS` and immediately when a queue item settles. After the final internal model response arrives, the progress block is closed, upstream `message_start` is discarded, upstream content indexes are shifted by one, and the remaining SSE events are spliced into the same lifecycle. This avoids duplicate `message_start` frames and avoids relying on pre-message `event: ping`, which Claude Code may ignore for idle-timeout accounting.
 
 Metrics:
 
 ```text
 vllm_cc_proxy_managed_web_tool_items_completed_total
-vllm_cc_proxy_managed_web_tool_progress_pings_total
+vllm_cc_proxy_managed_web_tool_progress_pings_total   # compatibility counter for item-completion progress
+vllm_cc_proxy_managed_stream_progress_deltas_total
+vllm_cc_proxy_managed_stream_splices_total
 ```
 
-Queue controls:
+Queue and stream controls:
 
 ```text
 MANAGED_WEB_TOOLS_MAX_BATCH=8
+MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS=15000
 WEBSEARCH_MAX_PARALLEL=2
 WEBFETCH_MAX_PARALLEL=2
 ```

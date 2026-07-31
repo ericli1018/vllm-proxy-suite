@@ -40,6 +40,7 @@ export function loadAnthropicConfig(env = process.env) {
     managedWebFetchToolNames: parseCsv(env.CLAUDE_CODE_WEBFETCH_TOOL_NAMES || 'WebFetch'),
     managedWebToolsThink: parseBoolean(env.MANAGED_WEB_TOOLS_THINK, false),
     managedWebToolsMaxBatch: positiveInteger(env.MANAGED_WEB_TOOLS_MAX_BATCH, 8),
+    managedWebStreamProgressIntervalMs: positiveInteger(env.MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS, 15000),
     webSearchMaxParallel: positiveInteger(env.WEBSEARCH_MAX_PARALLEL, 2),
     webFetchMaxParallel: positiveInteger(env.WEBFETCH_MAX_PARALLEL, 2),
     searxngBaseUrl: trimTrailingSlash(env.SEARXNG_BASE_URL || ''),
@@ -79,6 +80,7 @@ export function loadAnthropicConfig(env = process.env) {
 export function createAnthropicGuardedRoute(config, options = {}) {
   return {
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    managedStreamEnvelopeEnabled: Boolean(config.managedWebSearchEnabled || config.managedWebFetchEnabled),
     adapter: anthropicMessagesAdapter,
     prepareRequest(body) {
       return applyAnthropicRequestPolicy(body, config);

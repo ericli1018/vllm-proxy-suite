@@ -30,16 +30,17 @@ Think Loop detection remains heuristic before an action boundary. The default re
 ## Managed WebSearch limitations
 
 - The SearXNG bridge is disabled by default and requires an externally reachable SearXNG instance with JSON output enabled.
-- v0.7.1 manages one or more homogeneous WebSearch calls or one or more homogeneous WebFetch calls with bounded concurrency. Mixed Managed/Client Tool batches are still delivered unchanged to Claude Code.
-- Search results are snippets and links, not fetched source documents. WebFetch, PDF extraction, native Anthropic citations, encrypted server-tool state, and hosted-search usage accounting are not implemented.
+- v0.7.2 manages one or more homogeneous WebSearch calls or one or more homogeneous WebFetch calls with bounded concurrency. Mixed Managed/Client Tool batches are still delivered unchanged to Claude Code.
+- WebSearch results remain snippets and links. Managed WebFetch can read bounded HTML/text/PDF content, but native Anthropic citations, encrypted server-tool state, and hosted-search usage accounting are not implemented.
 - Allowed and blocked domains are enforced by filtering returned result hostnames; they are not a transport-level guarantee that SearXNG queried only those domains.
-- The bridge buffers each vLLM sub-response and performs an internal continuation, increasing latency and context usage. Completion pings keep streaming connections active, but the model continuation still waits for every Tool Result belonging to the same assistant turn.
+- The bridge buffers each vLLM sub-response and performs an internal continuation, increasing latency and context usage. A synthetic Anthropic lifecycle sends periodic valid invisible text deltas to keep Claude Code active, but the model continuation still waits for every Tool Result belonging to the same assistant turn.
 
 ## Managed WebFetch
 
 - HTML extraction is static and does not execute JavaScript.
 - Authenticated, CAPTCHA-protected, browser-only, and dynamically rendered pages may return incomplete content.
 - PDF extraction requires `pdftotext` from `poppler-utils`.
-- Managed Web Tool activity is internal to the Proxy and is not rendered as a Claude Code Tool row. Per-item SSE ping frames are transport progress only and normally produce no visible Claude Code text.
+- Managed Web Tool activity is internal to the Proxy and is not rendered as a Claude Code Tool row. Synthetic zero-width text deltas are transport progress and normally produce no visible Claude Code text; clients that expose invisible Unicode may still show an empty text block.
+- The synthetic `message_start` is emitted before upstream token usage is known, so downstream `usage.input_tokens` is reported as `0`; Proxy completion logs and internal metrics still retain the actual upstream usage reported by vLLM.
 - The implementation returns its own bounded evidence schema and does not emulate Anthropic hosted-tool encrypted content or native citations.
 - URL hostnames are resolved and checked before each request/redirect, but the current fetch transport does not pin the validated IP; environments requiring DNS-rebinding resistance should place the Proxy behind an egress firewall or outbound HTTP proxy.

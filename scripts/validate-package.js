@@ -25,6 +25,7 @@ const required = [
   'packages/anthropic/messages.js',
   'packages/anthropic/managed-websearch.js',
   'packages/anthropic/managed-web-tools.js',
+  'packages/anthropic/stream-envelope.js',
   'packages/anthropic/claude-code-tools/recovery.js',
   'packages/openai/chat-completions.js',
   'packages/openai/actionless-completion.js',
@@ -47,6 +48,7 @@ const required = [
   'test/anthropic-websearch-bridge-integration-v062.test.js',
   'test/anthropic-webfetch-bridge-v070.test.js',
   'test/anthropic-webfetch-bridge-integration-v070.test.js',
+  'test/anthropic-managed-stream-envelope-v072.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -71,7 +73,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.1') errors.push('package.json version must be 0.7.1');
+if (packageJson.version !== '0.7.2') errors.push('package.json version must be 0.7.2');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -116,6 +118,7 @@ if (!compose.includes('SEARXNG_MAX_USES')) errors.push('Compose must expose the 
 if (!compose.includes('SEARXNG_MAX_RESULT_BYTES')) errors.push('Compose must expose the SearXNG normalized result byte limit');
 if (!compose.includes('CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED')) errors.push('Compose must expose the Claude Code WebFetch bridge switch');
 if (!compose.includes('MANAGED_WEB_TOOLS_THINK')) errors.push('Compose must expose managed web-tool thinking control');
+if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS')) errors.push('Compose must expose managed Anthropic stream progress interval');
 if (!compose.includes('WEBFETCH_READER_CHUNK_CHARS')) errors.push('Compose must expose WebFetch reader chunk size');
 if (!compose.includes('WEBFETCH_MAX_DOWNLOAD_BYTES')) errors.push('Compose must expose WebFetch download limit');
 if (!compose.includes('WEBFETCH_PDF_PAGES_PER_CHUNK')) errors.push('Compose must expose PDF page grouping');
@@ -147,6 +150,13 @@ const anthropicRuntime = readFileSync(resolve(root, 'apps/vllm-cc-proxy/server.j
 if (!anthropicRuntime.includes('createAnthropicManagedWebToolsFetch')) errors.push('Anthropic runtime must support managed WebSearch and WebFetch');
 if (!anthropicRuntime.includes('managed_websearch_completed')) errors.push('Anthropic runtime must observe managed WebSearch lifecycle');
 if (!anthropicRuntime.includes('managed_webfetch_completed')) errors.push('Anthropic runtime must observe managed WebFetch lifecycle');
+if (!anthropicRuntime.includes('managedStreamEnvelopeEnabled')) errors.push('Anthropic runtime must enable managed stream envelopes');
+
+
+const managedStreamEnvelope = readFileSync(resolve(root, 'packages/anthropic/stream-envelope.js'), 'utf8');
+if (!managedStreamEnvelope.includes('message_start')) errors.push('Managed stream envelope must emit message_start');
+if (!managedStreamEnvelope.includes('content_block_delta')) errors.push('Managed stream envelope must emit content deltas');
+if (!managedStreamEnvelope.includes('payload.index + 1')) errors.push('Managed stream envelope must shift upstream block indexes');
 
 const openAiRuntime = readFileSync(resolve(root, 'apps/vllm-openai-proxy/server.js'), 'utf8');
 if (!openAiRuntime.includes('transparentToolPassthrough: true')) errors.push('OpenAI guarded routes must enable transparent Tool passthrough');

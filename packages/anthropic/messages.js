@@ -1,5 +1,11 @@
 import { classifyJsonParseError } from '../core/json-diagnostics.js';
 import { SseFrameDecoder } from '../core/sse.js';
+import {
+  createManagedAnthropicProgressDelta,
+  createManagedAnthropicProgressStop,
+  createManagedAnthropicStreamStart,
+  spliceManagedAnthropicStream,
+} from './stream-envelope.js';
 
 const UNSUPPORTED_FIELDS = [
   'thinking_token_budget',
@@ -419,6 +425,12 @@ export const anthropicMessagesAdapter = Object.freeze({
     }
     return { toolCalls, finalText };
   },
+  managedStreamEnvelope: Object.freeze({
+    start: createManagedAnthropicStreamStart,
+    progress: createManagedAnthropicProgressDelta,
+    stop: createManagedAnthropicProgressStop,
+    splice: spliceManagedAnthropicStream,
+  }),
   streamError(error) { return `event: error\ndata: ${JSON.stringify({ type: 'error', error })}\n\n`; },
   jsonError(error) { return { type: 'error', error }; },
 });

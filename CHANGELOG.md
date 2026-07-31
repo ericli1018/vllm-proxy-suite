@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.2 - 2026-07-31
+
+- Replaced pre-message SSE comments and `event: ping` keepalives with a valid synthetic Anthropic Messages stream envelope whenever a Managed Web bridge is enabled.
+- Emit `message_start`, a dedicated progress text block, and an immediate invisible `text_delta` before waiting for buffered vLLM or Managed Web Tool work.
+- Added periodic valid `content_block_delta` progress controlled by `MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS` (default 15000 ms), plus an immediate delta when each queue item settles.
+- Added final SSE splicing: close progress block index 0, discard upstream `message_start`, shift every upstream content block index by one, and preserve exactly one `message_stop`.
+- Disabled transparent Tool passthrough commit while the synthetic envelope is active so Bash/Read/Write Tool Calls are delivered inside the same lifecycle.
+- Suppressed false transport/semantic stall warnings while downstream managed-stream progress is active; total-generation and client-cancellation limits remain enforced.
+- Added `vllm_cc_proxy_managed_stream_progress_deltas_total` and `vllm_cc_proxy_managed_stream_splices_total`, regression tests, Compose configuration, and clean-package validation.
+
 ## 0.7.1 - 2026-07-31
 
 - Added homogeneous Managed Web Tool batches: parallel `WebSearch` calls and parallel `WebFetch` calls are no longer passed back to Claude Code.

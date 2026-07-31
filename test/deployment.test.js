@@ -37,6 +37,7 @@ test('Compose exposes both protocol-specific API keys on the gateway service', a
   for (const name of [
     'VLLM_CC_PROXY_API_KEY',
     'MANAGED_WEB_TOOLS_MAX_BATCH',
+    'MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS',
     'WEBSEARCH_MAX_PARALLEL',
     'WEBFETCH_MAX_PARALLEL',
     'VLLM_OPENAI_PROXY_API_KEY',

@@ -79,7 +79,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.6') errors.push('package.json version must be 0.7.6');
+if (packageJson.version !== '0.7.7') errors.push('package.json version must be 0.7.7');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -169,6 +169,7 @@ if (!anthropicRuntime.includes('detectAnthropicPlaceholderCompletionWithoutProgr
 if (!anthropicRuntime.includes('buildAnthropicActionRequiredRecovery')) errors.push('Anthropic runtime must enable Action-Intent Recovery');
 if (!anthropicRuntime.includes('buildAnthropicOutputRequiredRecovery')) errors.push('Anthropic runtime must enable output-required Recovery');
 if (!anthropicRuntime.includes('validateAnthropicOutputRequiredRecovery')) errors.push('Anthropic runtime must validate output-required Recovery');
+if (!anthropicRuntime.includes('isTargetlessClaudeCodeToolRecoveryIssue')) errors.push('Anthropic runtime must route targetless invalid mutation Tool calls to generic Recovery');
 
 
 const managedStreamEnvelope = readFileSync(resolve(root, 'packages/anthropic/stream-envelope.js'), 'utf8');

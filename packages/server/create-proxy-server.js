@@ -49,6 +49,8 @@ function createMetrics() {
     thinkingWithoutOutputRecoveriesFusedTotal: 0,
     placeholderCompletionsDetectedTotal: 0,
     placeholderRecoveriesFusedTotal: 0,
+    targetlessToolRecoveriesDetectedTotal: 0,
+    targetlessToolRecoveriesFusedTotal: 0,
     hostedToolsFilteredTotal: 0,
     requiredHostedToolsRejectedTotal: 0,
     malformedToolRetriesTotal: 0,
@@ -463,12 +465,17 @@ export function createProtocolProxyRuntime({
         config,
       });
       const recordActionlessCompletion = (validation, attemptNumber, recovery) => {
-        if (!['actionless_completion', 'action_intent_without_tool_call', 'thinking_without_output', 'placeholder_completion_without_progress'].includes(validation?.reason)) return;
+        const targetlessToolRecovery = validation?.reason === 'invalid_claude_code_tool_input'
+          && validation?.diagnostics?.targetlessToolRecovery === true;
+        if (!targetlessToolRecovery && !['actionless_completion', 'action_intent_without_tool_call', 'thinking_without_output', 'placeholder_completion_without_progress'].includes(validation?.reason)) return;
         const anthropicActionIntent = validation.reason === 'action_intent_without_tool_call';
         const thinkingWithoutOutput = validation.reason === 'thinking_without_output';
         const placeholderCompletion = validation.reason === 'placeholder_completion_without_progress';
         if (thinkingWithoutOutput && !recovery) return;
-        if (thinkingWithoutOutput) {
+        if (targetlessToolRecovery) {
+          metrics.targetlessToolRecoveriesDetectedTotal += 1;
+          if (recovery) metrics.targetlessToolRecoveriesFusedTotal += 1;
+        } else if (thinkingWithoutOutput) {
           metrics.thinkingWithoutOutputRecoveriesFusedTotal += 1;
         } else if (placeholderCompletion) {
           metrics.placeholderCompletionsDetectedTotal += 1;
@@ -480,13 +487,15 @@ export function createProtocolProxyRuntime({
           metrics.actionlessCompletionsDetectedTotal += 1;
           if (recovery) metrics.actionlessRecoveriesFusedTotal += 1;
         }
-        const event = thinkingWithoutOutput
-          ? 'thinking_without_output_fused'
-          : (placeholderCompletion
+        const event = targetlessToolRecovery
+          ? (recovery ? 'targetless_tool_recovery_fused' : 'targetless_tool_recovery_started')
+          : (thinkingWithoutOutput
+            ? 'thinking_without_output_fused'
+            : (placeholderCompletion
             ? (recovery ? 'placeholder_completion_without_progress_fused' : 'placeholder_completion_without_progress_detected')
             : (anthropicActionIntent
               ? (recovery ? 'action_intent_without_tool_call_fused' : 'action_intent_without_tool_call_detected')
-              : (recovery ? 'actionless_completion_fused' : 'actionless_completion_detected')));
+              : (recovery ? 'actionless_completion_fused' : 'actionless_completion_detected'))));
         requestLogger.warn(event, {
           attempt: attemptNumber,
           phase: recovery ? 'recovery' : 'initial',

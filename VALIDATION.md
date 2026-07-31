@@ -1,54 +1,92 @@
-# VLLM-PROXY-SUITE v0.7.6 Validation
+# VLLM-PROXY-SUITE v0.7.7 Validation
 
 Validation date: 2026-07-31
 
 ## Scope
 
-This release adds a conservative Anthropic placeholder-completion boundary. After a latest Claude Code Tool Result, an exact `No response` or `No output` marker (including the documented Traditional Chinese equivalents) is discarded and recovered once without forcing a Tool Call. The original Anthropic Tool choice is preserved, so `tool_choice={type:"auto"}` remains `auto`.
+This release fixes the Claude Code Recovery routing failure triggered by targetless mutation Tool inputs such as `Write({})`.
 
-Forced `tool_choice={type:"any",disable_parallel_tool_use:true}` remains limited to `action_intent_without_tool_call`, where the model has already announced a conservative first-person immediate external action while enabled tools are available.
+Previously, every invalid Claude Code mutation Tool issue carrying a context object entered exact-target Recovery. When `file_path` or `notebook_path` was absent, Recovery construction threw `Claude Code tool recovery requires an exact target path`, producing `recovery_build_failed` before a second model Attempt could begin.
+
+v0.7.7 separates the paths:
+
+```text
+invalid mutation + exact target
+→ existing locked-target Read/mutation Recovery
+
+invalid mutation + no exact target
+→ generic Output-Required Recovery
+→ preserve tools[] and tool_choice
+→ substantive text | complete valid Tool Call | blocking question
+```
+
+A repeated targetless invalid mutation in the Recovery Attempt is fused as `invalid_claude_code_tool_input` with `retryable:false`.
 
 ## Source verification
 
-- Full test suite: 265 passed, 0 failed.
+- Full test suite: 268 passed, 0 failed.
 - `npm run check`: passed.
-- Package validator: `valid:true`, version `0.7.6`, 83 files, 51 required files.
-- JavaScript syntax: 66 files passed `node --check` through the package checks and focused syntax verification.
+- Package validator: `valid:true`, version `0.7.7`, 84 files, 51 required files.
+- JavaScript syntax: 68 files passed `node --check`.
 - Compose YAML: parsed successfully.
 - Compose services: `vllm-proxy-suite`, `searxng`.
 
 ## Original-failure regressions
 
-- Immediate narration such as `好的，我開始執行階段 1。先查看當前目錄結構。` is still discarded when tools are available and the response ends with `end_turn` without a Tool Call.
-- Action-Intent Recovery preserves the original Anthropic `tools[]` and sets `tool_choice={type:"any",disable_parallel_tool_use:true}`.
-- A successful Action-Intent Recovery replays only the recovered Tool Call; the discarded narration is not delivered to Claude Code.
-- If Action-Intent Recovery returns only Thinking, the final failure is `action_intent_without_tool_call` with `retryable:false`.
-- If the initial result is `thinking_without_output`, Recovery preserves the original Tool choice; `auto` remains `auto`.
-- A Thinking-only Recovery may return a normal planning or explanatory answer and complete with HTTP 200.
-- If both attempts return only Thinking, the final failure remains `thinking_without_output` with `retryable:false` and no forced Tool Call.
-- Short inputs such as `繼續`, `開始`, `proceed`, and `go ahead` no longer promote Thinking-only Recovery to `tool_choice=any`.
-
-## Observability verification
-
-- Incoming and upstream Tool counts, names, Tool choice, and preservation state are logged without schemas, arguments, prompt text, or generated text.
-- Action-Intent Recovery logs `recoveryMode="action_required"` and `forcedToolChoice="any"`.
-- Thinking-only Recovery logs:
-  - `recoveryMode="output_required"`
-  - `recoveryOriginReason="thinking_without_output"`
-  - `recoveryToolChoice="auto|any|none|tool:<name>"`
-  - `forcedToolChoice=false`
-- A repeated empty-output Recovery records `thinking_without_output_fused` with `retryable:false`.
-- Prometheus metrics include:
-  - `vllm_cc_proxy_action_intent_without_tool_call_detected_total`
-  - `vllm_cc_proxy_action_intent_recoveries_fused_total`
-  - `vllm_cc_proxy_thinking_without_output_recoveries_fused_total`
+- `Write({})` is classified as `invalid_claude_code_tool_input` with `targetPath=null`.
+- The route selects `output_required` instead of calling exact-target Recovery.
+- Recovery preserves the original full Tool set.
+- An incoming `tool_choice={type:"auto"}` remains `auto`.
+- Recovery instructions state that the rejected Tool does not have to be reused.
+- A successful generic continuation may return substantive planning text with HTTP 200.
+- A second `Write({})` is returned with `retryable:false` after exactly two upstream Attempts.
+- No `recovery_request_rejected` or `recovery_build_failed` event occurs for the targetless path.
 
 ## Compatibility verification
 
-- Existing OpenAI Responses Actionless Completion behavior remains unchanged.
-- Existing OpenAI transparent/guarded, Chat Completions, Tool Passthrough, malformed Tool recovery, Claude Code file-tool recovery, Managed WebSearch/WebFetch, stream envelope, retry fingerprint, and deployment validation tests remain green.
-- Existing Anthropic action narration still uses one bounded forced-Tool Recovery.
-- Generic Anthropic loop and incomplete-output Recovery remains limited to one internal Recovery attempt.
+- Exact-target no-op Edit and failed mutation Recovery remains unchanged.
+- Exact target mismatch remains fail-closed.
+- Claude Code Action-Intent, Thinking-only, and Placeholder Completion Recovery tests remain green.
+- Managed WebSearch/WebFetch and stream-envelope tests remain green.
+- OpenAI Responses transparent/guarded, Chat Completions, Tool Passthrough, Hosted Tool filtering, and malformed Tool tests remain green.
+- Package and deployment validation tests remain green.
+
+## Observability verification
+
+Initial targetless invalid mutation:
+
+```text
+targetless_tool_recovery_started
+phase="initial"
+targetlessToolRecovery=true
+rejectedToolName="Write|Edit|NotebookEdit"
+```
+
+Recovery construction:
+
+```text
+recovery_request_built
+recoveryMode="output_required"
+recoveryOriginReason="invalid_claude_code_tool_input"
+recoveryToolChoice="auto|any|none|tool:<name>"
+targetlessToolRecovery=true
+forcedToolChoice=false
+```
+
+Repeated failure:
+
+```text
+targetless_tool_recovery_fused
+phase="recovery"
+retryable=false
+```
+
+Prometheus counters:
+
+```text
+vllm_cc_proxy_targetless_tool_recoveries_detected_total
+vllm_cc_proxy_targetless_tool_recoveries_fused_total
+```
 
 ## Remaining deployment verification
 
@@ -57,16 +95,3 @@ The following require the target deployment environment and were not executed in
 - Live Claude Code → Proxy → target vLLM integration.
 - Docker image build and container startup against the production model endpoint.
 - Long-running concurrency, cancellation, and memory-pressure tests.
-
-## Placeholder Completion Guard
-
-- Exact placeholder-only `end_turn` responses after a latest Tool Result are classified as `placeholder_completion_without_progress`.
-- Substantive sentences, ordinary short answers, `N/A`, and non-Tool-Result turns remain valid.
-- Recovery uses `output_required`, preserves `tool_choice`, and may return substantive text, a Tool Call, or one blocking question.
-- A repeated placeholder is fused with `retryable:false` after the single Recovery slot.
-- Lifecycle events:
-  - `placeholder_completion_without_progress_detected`
-  - `placeholder_completion_without_progress_fused`
-- Counters:
-  - `vllm_cc_proxy_placeholder_completions_detected_total`
-  - `vllm_cc_proxy_placeholder_recoveries_fused_total`

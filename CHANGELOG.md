@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.7 - 2026-07-31
+
+- Split invalid Claude Code mutation Tool recovery by target availability: only issues with an exact `file_path` or `notebook_path` enter the existing locked-target Recovery.
+- Targetless invalid mutation calls such as `Write({})` are discarded and routed to one generic Output-Required Recovery instead of throwing `Claude Code tool recovery requires an exact target path`.
+- Generic continuation preserves the full Anthropic `tools[]` set and original `tool_choice`; `auto` remains `auto`, so the model may return a substantive answer, a complete valid Tool Call, or one genuinely blocking question.
+- The Recovery instruction does not assume the rejected Tool must be reused and explicitly rejects another empty or incomplete Tool Call.
+- A second targetless invalid mutation call is fused as `invalid_claude_code_tool_input` with `retryable:false`, preventing Claude Code API retry cascades.
+- Added `targetless_tool_recovery_started` / `targetless_tool_recovery_fused` lifecycle events, Prometheus counters, focused regressions, package validation, and documentation.
+
 ## 0.7.6 - 2026-07-31
 
 - Added the Anthropic `placeholder_completion_without_progress` guard for terminal placeholder-only replies immediately after a Claude Code Tool Result.

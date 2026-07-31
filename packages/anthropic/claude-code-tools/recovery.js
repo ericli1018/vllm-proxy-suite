@@ -111,6 +111,17 @@ function isMutationTool(name) {
   return [TOOL_NAMES.EDIT, TOOL_NAMES.WRITE, TOOL_NAMES.NOTEBOOK_EDIT].includes(name);
 }
 
+export function isTargetlessClaudeCodeToolRecoveryIssue(issue) {
+  return Boolean(
+    issue
+    && issue.ok === false
+    && issue.reason === 'invalid_claude_code_tool_input'
+    && issue.context
+    && isMutationTool(issue.context.toolName)
+    && !issue.context.targetPath
+  );
+}
+
 function enabledForTool(name, config) {
   if (!config?.claudeCodeToolRecoveryEnabled) return false;
   if (name === TOOL_NAMES.EDIT) return config.claudeCodeEditRecoveryEnabled !== false;

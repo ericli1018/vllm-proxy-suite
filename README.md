@@ -689,6 +689,32 @@ Recovery 必須只有一個允許的 Tool Call、不能帶 Final Text、不能�
 
 Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前次 generation 已丟棄、Recovery 是正常流程、不得解釋前次失敗，只執行下一個有效動作。
 
+### Targetless Invalid Tool Recovery
+
+當 mutation Tool 的輸入不符合本次 `input_schema`，Proxy 先依是否具有精確目標分流：
+
+```text
+有 file_path／notebook_path
+→ 既有 exact-target Recovery
+→ 鎖定 Read 或原 mutation Tool 與目標路徑
+
+沒有精確目標，例如 Write({})
+→ generic Output-Required Recovery
+→ 保留完整 tools[]
+→ 保留原 tool_choice；auto 仍為 auto
+```
+
+Targetless Recovery 不假設模型一定應該再次呼叫 `Write`、`Edit` 或 `NotebookEdit`。它允許模型根據原始任務與已接受 Tool Result，輸出實質文字、完整有效的 Tool Call，或一個真正阻塞問題；同時禁止重複空白或不完整 Tool Call。第二次仍產生 targetless invalid mutation 時，Proxy 保留 `reason="invalid_claude_code_tool_input"` 並回傳 `retryable=false`，不再讓 Recovery Builder 因缺少路徑拋出 `recovery_build_failed`。
+
+Lifecycle：
+
+```text
+targetless_tool_recovery_started
+targetless_tool_recovery_fused
+```
+
+此能力由既有 `CLAUDE_CODE_TOOL_RECOVERY_ENABLED` 控制，不新增獨立開關。
+
 ## 主要環境變數
 
 ### Gateway／共用

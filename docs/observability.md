@@ -613,6 +613,29 @@ phase="recovery"
 retryable=false
 ```
 
+When a mutation Tool Call has invalid schema input but no exact target path, the initial issue logs:
+
+```text
+targetless_tool_recovery_started
+attempt=1
+phase="initial"
+rejectedToolName="Write|Edit|NotebookEdit"
+targetlessToolRecovery=true
+```
+
+The Recovery request reports:
+
+```text
+recovery_request_built
+recoveryMode="output_required"
+recoveryOriginReason="invalid_claude_code_tool_input"
+recoveryToolChoice="auto|any|none|tool:<name>"
+targetlessToolRecovery=true
+forcedToolChoice=false
+```
+
+A second targetless invalid mutation logs `targetless_tool_recovery_fused` with `retryable=false`.
+
 Prometheus counters:
 
 ```text
@@ -621,6 +644,8 @@ vllm_cc_proxy_action_intent_recoveries_fused_total
 vllm_cc_proxy_thinking_without_output_recoveries_fused_total
 vllm_cc_proxy_placeholder_completions_detected_total
 vllm_cc_proxy_placeholder_recoveries_fused_total
+vllm_cc_proxy_targetless_tool_recoveries_detected_total
+vllm_cc_proxy_targetless_tool_recoveries_fused_total
 ```
 
 ## Responses Hosted Tool and malformed-tool diagnostics

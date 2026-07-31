@@ -174,25 +174,40 @@ function recoveryInstruction(issue) {
 
 function outputRecoveryInstruction(issue) {
   const placeholderCompletion = issue.reason === 'placeholder_completion_without_progress';
+  const targetlessToolInput = issue.reason === 'invalid_claude_code_tool_input'
+    && issue.diagnostics?.targetlessToolRecovery === true
+    && !issue.context?.targetPath;
+  const previousFailure = targetlessToolInput
+    ? 'The previous tool call had incomplete or invalid input and was discarded.'
+    : (placeholderCompletion
+      ? 'The previous response contained only a placeholder after the latest accepted Tool Result.'
+      : 'The previous response ended after reasoning without visible output or a tool call.');
   return [
     'Recovery is expected and the original task remains solvable.',
-    placeholderCompletion
-      ? 'The previous response contained only a placeholder after the latest accepted Tool Result.'
-      : 'The previous response ended after reasoning without visible output or a tool call.',
+    previousFailure,
     'The previous generation was discarded and did not change task or tool state.',
     'Continue from the original request and accepted prior tool results only.',
     'Do not explain the recovery or repeat hidden reasoning.',
-    'Produce one valid user-visible response now.',
+    targetlessToolInput
+      ? 'Produce one substantive user-visible response, one complete valid tool call if external action is required, or one genuinely blocking question.'
+      : 'Produce one valid user-visible response now.',
     'Use a supplied tool only when the task actually requires external action; otherwise answer, explain, plan, report completion, wait for confirmation, or ask one genuinely blocking question.',
-    ...(placeholderCompletion
-      ? ['Do not answer with “No response”, “No output”, “無回應”, “沒有回應”, “無輸出”, “沒有輸出”, or another placeholder.']
-      : ['Do not end the turn with reasoning only.']),
+    ...(targetlessToolInput
+      ? ['Do not assume the rejected tool must be used. Do not repeat an empty or incomplete tool call.']
+      : (placeholderCompletion
+        ? ['Do not answer with “No response”, “No output”, “無回應”, “沒有回應”, “無輸出”, “沒有輸出”, or another placeholder.']
+        : ['Do not end the turn with reasoning only.'])),
     `Recovery reason: ${issue.reason}.`,
   ].join(' ');
 }
 
 export function buildAnthropicOutputRequiredRecovery({ original, prepared = null, issue, config }) {
-  if (!issue || issue.ok !== false || !['thinking_without_output', 'placeholder_completion_without_progress'].includes(issue.reason)) {
+  const supportedReasons = ['thinking_without_output', 'placeholder_completion_without_progress', 'invalid_claude_code_tool_input'];
+  const targetlessToolInput = issue?.reason === 'invalid_claude_code_tool_input'
+    && issue?.diagnostics?.targetlessToolRecovery === true
+    && issue?.context
+    && !issue.context.targetPath;
+  if (!issue || issue.ok !== false || !supportedReasons.includes(issue.reason) || (issue.reason === 'invalid_claude_code_tool_input' && !targetlessToolInput)) {
     throw new TypeError('An Anthropic output-required recovery issue is required');
   }
 
@@ -206,6 +221,8 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
     originReason: issue.reason,
     candidateNames: [...toolContext.requestToolNames],
     rejectPlaceholderCompletion: issue.reason === 'placeholder_completion_without_progress',
+    targetlessToolRecovery: targetlessToolInput,
+    ...(targetlessToolInput ? { rejectedToolName: issue.context.toolName || null } : {}),
   };
   return {
     body,
@@ -219,6 +236,8 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
       recoveryToolChoice: toolContext.requestToolChoice,
       forcedToolChoice: false,
       parallelToolCallsDisabled: toolContext.parallelToolCallsDisabled,
+      targetlessToolRecovery: plan.targetlessToolRecovery,
+      ...(plan.targetlessToolRecovery ? { rejectedToolName: plan.rejectedToolName } : {}),
     },
   };
 }

@@ -23,7 +23,8 @@
 21. `required_on_explicit_continue` recognizes only short explicit execution commands. It intentionally does not classify general task prompts, and `tool_choice=required` still cannot guarantee semantically correct tool selection or arguments.
 22. Anthropic `thinking_without_output` Recovery preserves the request Tool choice and permits text or Tool output. This avoids forced irrelevant tools, but the model may still choose narration or a clarification instead of the external action the user intended unless the Action-Intent Guard independently matches its visible output.
 23. The placeholder completion guard intentionally recognizes only exact `No response`, `No output`, `無回應`, `沒有回應`, `無輸出`, and `沒有輸出` markers after a latest Tool Result. Other model-specific placeholder phrases are delivered unless added explicitly; this conservative boundary avoids blocking legitimate short answers.
-24. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
+24. Targetless invalid mutation recovery intentionally does not infer or synthesize a missing file path. It preserves `tool_choice` and asks the model to continue from accepted state; if a precise target is required, the model must provide it in a complete Tool Call or ask the user.
+25. Live integration with the target vLLM, Codex, Claude Code, Hermes, and OpenAI SDK must still be verified in the deployment environment.
 
 ## Think Loop heuristic
 

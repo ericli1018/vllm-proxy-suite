@@ -130,9 +130,27 @@ Read freshness is derived from accepted history. A failed mutation invalidates p
 
 Without fresh target evidence, Recovery permits only the exact `Read`. With fresh evidence, it permits only the original mutation tool, locks the target, and rejects no-op, `replace_all` expansion, and exact failed-argument replay.
 
+### Targetless invalid mutation input
+
+A mutation Tool issue enters exact-target Recovery only when the rejected input contains an exact `file_path` or `notebook_path`. Inputs such as `Write({})` have no safe target to lock and therefore use generic Output-Required Recovery instead of failing Recovery construction.
+
+The targetless path preserves the original Tool set and Tool choice. It does not force the rejected Tool because the correct continuation may be a planning response, a completion report, another valid Tool, or one blocking question. The rejected generation is discarded, and another empty or schema-incomplete targetless mutation in the single Recovery Attempt is returned as `invalid_claude_code_tool_input` with `retryable=false`.
+
+```text
+invalid mutation + exact target
+→ locked file-tool Recovery
+
+invalid mutation + no exact target
+→ output_required / tool_choice preserved
+→ substantive text | valid Tool Call | blocking question
+→ repeated invalid targetless mutation: fused
+```
+
 ## Deterministic Tool JSON failures
 
-Anthropic and any protected non-passthrough validation path do not generically retry deterministic Tool structure failures:
+The targetless mutation path above is a narrow exception for a fully parsed mutation object that lacks a safe target. Malformed JSON, oversized arguments, excessive Tool Calls, and unrelated deterministic Tool structure failures are not generically retried.
+
+Anthropic and any protected non-passthrough validation path do not generically retry these deterministic Tool structure failures:
 
 ```text
 malformed_tool_arguments

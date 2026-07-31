@@ -5,6 +5,7 @@ import { anthropicMessagesAdapter, applyAnthropicRequestPolicy, buildAnthropicRe
 import {
   analyzeClaudeCodeToolAttempt,
   buildClaudeCodeToolRecovery,
+  isTargetlessClaudeCodeToolRecoveryIssue,
   validateClaudeCodeToolRecovery,
 } from '../../packages/anthropic/claude-code-tools/recovery.js';
 import { createProtocolProxyRuntime } from '../../packages/server/create-proxy-server.js';
@@ -131,7 +132,21 @@ export function createAnthropicGuardedRoute(config, options = {}) {
         output,
         config,
       });
-      if (!toolValidation.ok) return toolValidation;
+      if (!toolValidation.ok) {
+        if (isTargetlessClaudeCodeToolRecoveryIssue(toolValidation)) {
+          return {
+            ...toolValidation,
+            retryable: !recovery,
+            diagnostics: {
+              ...(toolValidation.diagnostics || {}),
+              targetlessToolRecovery: true,
+              targetlessToolRecoveryAttempted: Boolean(recovery),
+              rejectedToolName: toolValidation.context?.toolName || null,
+            },
+          };
+        }
+        return toolValidation;
+      }
       const completion = anthropicMessagesAdapter.completionDiagnostics(attempt.result);
       if (config.claudeCodePlaceholderCompletionGuardEnabled) {
         const placeholderValidation = detectAnthropicPlaceholderCompletionWithoutProgress({
@@ -197,7 +212,10 @@ export function createAnthropicGuardedRoute(config, options = {}) {
           config,
         });
       }
-      if (['thinking_without_output', 'placeholder_completion_without_progress'].includes(reason?.reason)) {
+      if (
+        ['thinking_without_output', 'placeholder_completion_without_progress'].includes(reason?.reason)
+        || (config.claudeCodeToolRecoveryEnabled && isTargetlessClaudeCodeToolRecoveryIssue(reason))
+      ) {
         return buildAnthropicOutputRequiredRecovery({
           original: originalBody,
           prepared: firstBody || applyAnthropicRequestPolicy(originalBody, config),

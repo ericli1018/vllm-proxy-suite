@@ -191,7 +191,7 @@ Proxy 不改寫 `model`，名稱必須與 vLLM `--served-model-name` 一致。
 
 ### Claude Code Managed WebSearch／WebFetch
 
-v0.7.0 提供 opt-in Managed Web Tools Layer。只有 assistant response 中**正好一個**受管理工具時才攔截；混合或平行工具整份原樣交回 Claude Code。
+v0.7.1 提供 opt-in Managed Web Tools Layer。單一受管理工具與**同類型平行批次**都由 Proxy 攔截；`WebSearch + WebSearch` 或 `WebFetch + WebFetch` 進入有界內部隊列，混合 Managed/Client Tools 仍整份原樣交回 Claude Code。
 
 ```text
 WebSearch
@@ -223,6 +223,18 @@ Managed WebSearch continuation、WebFetch Chunk Reader、Document Synthesizer �
 ```
 
 外層 Claude Code request 不會被全域關閉 thinking；只有 Proxy 內部 Managed Web Tool requests 使用 no-thinking policy。
+
+同類型平行工具採有界隊列：
+
+```text
+assistant: WebSearch A + WebSearch B + WebSearch C
+→ Proxy queue，最多 WEBSEARCH_MAX_PARALLEL 筆同時執行
+→ 任一項完成即記錄結果並立即向 Claude Code SSE stream 送出標準 ping
+→ 其他項目繼續執行
+→ 全部 tool_use_id 都有結果後，以單一 user tool_result turn 做 continuation
+```
+
+`WebFetch` 使用相同排程，但每一項可能包含下載、Chunk Reader 與 Synthesizer，因此由 `WEBFETCH_MAX_PARALLEL` 獨立限制。完成事件不會把內部 `tool_result` 暴露給 Claude Code，也不會顯示成 `Search(...)` 工具列；SSE ping 的用途是立即產生有效網路進度、維持連線並重置 Proxy stall 計時。Anthropic Tool ID 配對要求所有同一 assistant turn 的結果齊備後才能安全 continuation。
 
 啟用內建 SearXNG 與兩個 Bridge：
 
@@ -681,6 +693,9 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 | `CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED` | `false` |
 | `CLAUDE_CODE_WEBFETCH_TOOL_NAMES` | `WebFetch` |
 | `MANAGED_WEB_TOOLS_THINK` | `false`；Managed Search/Fetch 內部 vLLM request 使用 `think:false` |
+| `MANAGED_WEB_TOOLS_MAX_BATCH` | `8`；單一 assistant turn 可由 Proxy 管理的同類工具上限，超出項目回內部 error result |
+| `WEBSEARCH_MAX_PARALLEL` | `2`；WebSearch 隊列最大同時執行數 |
+| `WEBFETCH_MAX_PARALLEL` | `2`；WebFetch 文件工作最大同時執行數 |
 | `WEBFETCH_TIMEOUT_MS` | `20000` |
 | `WEBFETCH_MAX_USES` | `3` |
 | `WEBFETCH_MAX_REDIRECTS` | `5` |

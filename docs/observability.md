@@ -568,3 +568,42 @@ vllm_cc_proxy_managed_web_fetch_chunks_total
 ```
 
 Managed tool calls are server-side internal operations, so Claude Code does not display `Search(...)` or `WebFetch(...)`. The final response or next ordinary Claude Code Tool Call is replayed after the internal loop completes.
+
+## Managed Web Tool queue progress
+
+A homogeneous WebSearch or WebFetch batch emits one lifecycle event per settled queue item:
+
+```text
+event=managed_tool_item_completed
+kind="search" | "fetch"
+toolUseId="..."
+toolName="WebSearch" | "WebFetch"
+ok=true | false
+completed=1
+total=3
+durationMs=...
+```
+
+No query, URL, snippet, fetched page, or Tool Result content is logged. For a streaming Claude Code request, the same completion immediately sends:
+
+```text
+event: ping
+data: {"type":"ping"}
+```
+
+The ping is protocol-valid transport progress. It keeps the downstream stream active and resets `lastUpstreamActivityMs` / `lastSemanticActivityMs`, but it does not expose an internal Tool Call or render a Claude Code `Search(...)` row. Final model continuation begins only after all Tool Results from that assistant turn are available and correlated by their original `tool_use_id`.
+
+Metrics:
+
+```text
+vllm_cc_proxy_managed_web_tool_items_completed_total
+vllm_cc_proxy_managed_web_tool_progress_pings_total
+```
+
+Queue controls:
+
+```text
+MANAGED_WEB_TOOLS_MAX_BATCH=8
+WEBSEARCH_MAX_PARALLEL=2
+WEBFETCH_MAX_PARALLEL=2
+```

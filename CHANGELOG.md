@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.1 - 2026-07-31
+
+- Added homogeneous Managed Web Tool batches: parallel `WebSearch` calls and parallel `WebFetch` calls are no longer passed back to Claude Code.
+- Added bounded internal queues with `WEBSEARCH_MAX_PARALLEL`, `WEBFETCH_MAX_PARALLEL`, and `MANAGED_WEB_TOOLS_MAX_BATCH`.
+- Each completed queue item is recorded immediately, preserves its original `tool_use_id`, and emits a standard Anthropic SSE `ping` to the connected Claude Code stream without exposing the internal Tool Result.
+- Reset attempt activity and stall diagnostics on managed-item completion and added `managed_tool_item_completed` lifecycle logs.
+- Added `vllm_cc_proxy_managed_web_tool_items_completed_total` and `vllm_cc_proxy_managed_web_tool_progress_pings_total` metrics.
+- Kept one protocol-correct continuation after all Tool Results from the same assistant turn are available; mixed Managed/Client Tool responses remain passthrough.
+- Updated `docker-compose.partial.yaml`, runtime configuration, deployment tests, and documentation for batch and concurrency controls.
+
 ## 0.7.0 - 2026-07-31
 
 - Added an opt-in Claude Code Managed WebFetch bridge for exactly one `WebFetch` Tool Call.

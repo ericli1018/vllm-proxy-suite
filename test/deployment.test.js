@@ -36,6 +36,9 @@ test('Compose exposes both protocol-specific API keys on the gateway service', a
   const compose = await read('docker-compose.partial.yaml');
   for (const name of [
     'VLLM_CC_PROXY_API_KEY',
+    'MANAGED_WEB_TOOLS_MAX_BATCH',
+    'WEBSEARCH_MAX_PARALLEL',
+    'WEBFETCH_MAX_PARALLEL',
     'VLLM_OPENAI_PROXY_API_KEY',
     'CLAUDE_CODE_TOOL_RECOVERY_ENABLED',
     'RECOVERY_NETWORK_LOOKUP_TOOL_NAMES',

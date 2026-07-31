@@ -136,6 +136,7 @@ export async function performBufferedAttempt({
   attemptNumber = 1,
   toolPassthrough = null,
   behaviorGuardsEnabled = true,
+  managedProgress = null,
 }) {
   const controller = new AbortController();
   const onClientAbort = () => controller.abort('client_cancelled');
@@ -167,6 +168,20 @@ export async function performBufferedAttempt({
     observer?.onState?.({ requestId, attempt: attemptNumber, state, ...fields });
   };
   setState('upstream_connecting');
+
+  const handleManagedProgress = async (event = {}) => {
+    const now = performance.now();
+    lastByteAtMono = now;
+    lastSemanticAtMono = now;
+    setState('managed_tool_executing', {
+      managedToolKind: event.kind || null,
+      managedToolUseId: event.toolUseId || null,
+      managedCompleted: event.completed ?? null,
+      managedTotal: event.total ?? null,
+    });
+    observer?.onManagedProgress?.({ requestId, attempt: attemptNumber, ...event });
+    await managedProgress?.(event);
+  };
 
   const reportProgress = () => {
     if (!observer?.onProgress) return;
@@ -263,7 +278,13 @@ export async function performBufferedAttempt({
     let response;
     try {
       response = await Promise.race([
-        fetchImpl(url, { method, headers, body: requestBody, signal: controller.signal }),
+        fetchImpl(url, {
+          method,
+          headers,
+          body: requestBody,
+          signal: controller.signal,
+          ...(managedProgress || observer?.onManagedProgress ? { onManagedProgress: handleManagedProgress } : {}),
+        }),
         totalTimeout.promise,
       ]);
       headersAtMono = performance.now();

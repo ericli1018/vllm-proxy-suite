@@ -169,18 +169,24 @@ function toolNameSet(config, kind) {
   return new Set((values || fallback).map((name) => String(name).toLowerCase()));
 }
 
-function managedToolCall(result, config) {
+function managedCallKind(call, config) {
+  if (!call?.id || call.toolJsonError || !call.input || typeof call.input !== 'object' || Array.isArray(call.input)) return null;
+  const normalized = String(call.name || '').toLowerCase();
+  if (config.managedWebSearchEnabled && toolNameSet(config, 'search').has(normalized)) return 'search';
+  if (config.managedWebFetchEnabled && toolNameSet(config, 'fetch').has(normalized)) return 'fetch';
+  return null;
+}
+
+function managedToolBatch(result, config) {
   if (result?.stopReason !== 'tool_use') return null;
   const blocks = Array.isArray(result?.blocks) ? result.blocks : [];
   if (blocks.some((block) => !['thinking', 'text', 'tool_use'].includes(block.type))) return null;
   const calls = toolBlocks(result);
-  if (calls.length !== 1) return null;
-  const call = calls[0];
-  if (!call.id || call.toolJsonError || !call.input || typeof call.input !== 'object' || Array.isArray(call.input)) return null;
-  const normalized = String(call.name || '').toLowerCase();
-  if (config.managedWebSearchEnabled && toolNameSet(config, 'search').has(normalized)) return { kind: 'search', call };
-  if (config.managedWebFetchEnabled && toolNameSet(config, 'fetch').has(normalized)) return { kind: 'fetch', call };
-  return null;
+  if (calls.length === 0) return null;
+  const kinds = calls.map((call) => managedCallKind(call, config));
+  if (kinds.some((kind) => !kind)) return null;
+  if (new Set(kinds).size !== 1) return null;
+  return { kind: kinds[0], calls };
 }
 
 function assistantContent(result) {
@@ -220,12 +226,59 @@ export function buildManagedNoThinkRequest(base, { system, prompt, maxTokens }, 
   };
 }
 
-function appendToolResult(requestBody, result, call, content, isError, config) {
+function appendToolResults(requestBody, result, results, config) {
   const body = structuredClone(requestBody);
   body.messages = Array.isArray(body.messages) ? body.messages : [];
   body.messages.push({ role: 'assistant', content: assistantContent(result) });
-  body.messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: call.id, content, is_error: Boolean(isError) }] });
+  body.messages.push({
+    role: 'user',
+    content: results.map(({ call, content, isError }) => ({
+      type: 'tool_result',
+      tool_use_id: call.id,
+      content,
+      is_error: Boolean(isError),
+    })),
+  });
   return applyManagedThinkingPolicy(body, config);
+}
+
+function appendToolResult(requestBody, result, call, content, isError, config) {
+  return appendToolResults(requestBody, result, [{ call, content, isError }], config);
+}
+
+async function notifyManagedProgress(callback, event) {
+  if (typeof callback !== 'function') return;
+  try {
+    await callback(event);
+  } catch {
+    // Progress delivery must never change tool execution semantics.
+  }
+}
+
+async function runManagedQueue(items, maxParallel, worker, onSettled) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  let completed = 0;
+  const runner = async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      const startedAt = Date.now();
+      const value = await worker(items[index], index);
+      results[index] = value;
+      completed += 1;
+      await onSettled?.(value, {
+        index,
+        completed,
+        total: items.length,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
+    }
+  };
+  const concurrency = Math.min(items.length, positiveInteger(maxParallel, 1));
+  await Promise.all(Array.from({ length: concurrency }, () => runner()));
+  return results;
 }
 
 function removeManagedTools(requestBody, config, kind = 'all') {
@@ -365,7 +418,7 @@ async function fetchDocument(fetchImpl, input, config, parentSignal, resolveHost
       redirect: 'manual',
       headers: {
         accept: 'text/html, text/plain;q=0.9, application/pdf;q=0.8',
-        'user-agent': 'VLLM-PROXY-SUITE-Managed-WebFetch/0.7',
+        'user-agent': 'VLLM-PROXY-SUITE-Managed-WebFetch/0.7.1',
       },
     }, positiveInteger(config.webFetchTimeoutMs, 20000), parentSignal, 'managed_webfetch_timeout');
     if (REDIRECT_STATUSES.has(response.status)) {
@@ -681,12 +734,15 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
   };
 
   return async function anthropicManagedWebToolsFetch(url, init = {}) {
-    const rawRequest = typeof init.body === 'string' ? init.body : Buffer.from(init.body || '').toString('utf8');
+    const onManagedProgress = typeof init.onManagedProgress === 'function' ? init.onManagedProgress : null;
+    const upstreamInit = { ...init };
+    delete upstreamInit.onManagedProgress;
+    const rawRequest = typeof upstreamInit.body === 'string' ? upstreamInit.body : Buffer.from(upstreamInit.body || '').toString('utf8');
     let requestBody;
     try {
       requestBody = JSON.parse(rawRequest || '{}');
     } catch {
-      return fetchImpl(url, init);
+      return fetchImpl(url, upstreamInit);
     }
 
     const stats = {
@@ -696,7 +752,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
     let limitContinuation = false;
 
     while (true) {
-      const upstream = await fetchImpl(url, { ...init, body: JSON.stringify(requestBody) });
+      const upstream = await fetchImpl(url, { ...upstreamInit, body: JSON.stringify(requestBody) });
       if (!upstream.ok) {
         if (stats.searchUses === 0 && stats.fetchUses === 0) return upstream;
         const raw = Buffer.from(await upstream.arrayBuffer());
@@ -710,44 +766,120 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
         return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
       }
 
-      const managed = managedToolCall(result, config);
+      const managed = managedToolBatch(result, config);
       if (!managed || limitContinuation) return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
-      const { kind, call } = managed;
+      const { kind } = managed;
+      const maxBatch = positiveInteger(config.managedWebToolsMaxBatch, 8);
+      const calls = managed.calls.slice(0, maxBatch);
+      const overflow = managed.calls.slice(maxBatch);
+      const progressTotal = managed.calls.length;
+      let progressCompleted = 0;
+      const emitProgress = async (entry, details = {}) => {
+        progressCompleted += 1;
+        await notifyManagedProgress(onManagedProgress, {
+          kind,
+          toolUseId: entry.call.id,
+          toolName: entry.call.name,
+          ok: !entry.isError,
+          completed: progressCompleted,
+          total: progressTotal,
+          durationMs: details.durationMs ?? 0,
+        });
+      };
 
       if (kind === 'search') {
-        if (stats.searchUses >= positiveInteger(config.searxngMaxUses, 5)) {
+        const maxUses = positiveInteger(config.searxngMaxUses, 5);
+        const remaining = Math.max(0, maxUses - stats.searchUses);
+        const executable = calls.slice(0, remaining);
+        const limited = calls.slice(remaining);
+        const results = new Array(managed.calls.length);
+        stats.searchUses += executable.length;
+
+        const executed = await runManagedQueue(
+          executable,
+          config.webSearchMaxParallel,
+          async (call) => {
+            try {
+              const normalized = await executeSearch(fetchImpl, call, config, upstreamInit.signal);
+              return { call, content: normalized.text, isError: false };
+            } catch (error) {
+              if (upstreamInit.signal?.aborted) throw error;
+              stats.searchFailures += 1;
+              return { call, content: `Managed WebSearch failed: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+            }
+          },
+          async (entry, details) => {
+            const originalIndex = managed.calls.indexOf(entry.call);
+            results[originalIndex] = entry;
+            await emitProgress(entry, details);
+          },
+        );
+        void executed;
+
+        for (const call of limited) {
           stats.searchLimitReached = true;
-          requestBody = removeManagedTools(appendToolResult(requestBody, result, call, 'WebSearch use limit reached. Continue without additional web searches.', true, config), config, 'search');
-          limitContinuation = true;
-          continue;
+          const entry = { call, content: 'WebSearch use limit reached. Continue without additional web searches.', isError: true };
+          results[managed.calls.indexOf(call)] = entry;
+          await emitProgress(entry);
         }
-        stats.searchUses += 1;
-        try {
-          const normalized = await executeSearch(fetchImpl, call, config, init.signal);
-          requestBody = appendToolResult(requestBody, result, call, normalized.text, false, config);
-        } catch (error) {
-          if (init.signal?.aborted) throw error;
-          stats.searchFailures += 1;
-          requestBody = appendToolResult(requestBody, result, call, `Managed WebSearch failed: ${error instanceof Error ? error.message : String(error)}`, true, config);
+        for (const call of overflow) {
+          stats.searchLimitReached = true;
+          const entry = { call, content: 'Managed WebSearch batch limit reached. Continue without this search.', isError: true };
+          results[managed.calls.indexOf(call)] = entry;
+          await emitProgress(entry);
+        }
+        requestBody = appendToolResults(requestBody, result, results, config);
+        if (limited.length > 0 || overflow.length > 0) {
+          requestBody = removeManagedTools(requestBody, config, 'search');
+          limitContinuation = true;
         }
         continue;
       }
 
-      if (stats.fetchUses >= positiveInteger(config.webFetchMaxUses, 3)) {
+      const maxUses = positiveInteger(config.webFetchMaxUses, 3);
+      const remaining = Math.max(0, maxUses - stats.fetchUses);
+      const executable = calls.slice(0, remaining);
+      const limited = calls.slice(remaining);
+      const results = new Array(managed.calls.length);
+      stats.fetchUses += executable.length;
+
+      await runManagedQueue(
+        executable,
+        config.webFetchMaxParallel,
+        async (call) => {
+          try {
+            const fetched = await executeWebFetch(fetchImpl, url, upstreamInit, requestBody, call, config, upstreamInit.signal, dependencies);
+            stats.fetchChunks += fetched.chunks;
+            return { call, content: fetched.text, isError: false };
+          } catch (error) {
+            if (upstreamInit.signal?.aborted) throw error;
+            stats.fetchFailures += 1;
+            return { call, content: `Managed WebFetch failed: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+          }
+        },
+        async (entry, details) => {
+          const originalIndex = managed.calls.indexOf(entry.call);
+          results[originalIndex] = entry;
+          await emitProgress(entry, details);
+        },
+      );
+
+      for (const call of limited) {
         stats.fetchLimitReached = true;
-        requestBody = removeManagedTools(appendToolResult(requestBody, result, call, 'WebFetch use limit reached. Continue without additional page fetches.', true, config), config, 'fetch');
-        limitContinuation = true;
-        continue;
+        const entry = { call, content: 'WebFetch use limit reached. Continue without additional page fetches.', isError: true };
+        results[managed.calls.indexOf(call)] = entry;
+        await emitProgress(entry);
       }
-      stats.fetchUses += 1;
-      try {
-        const fetched = await executeWebFetch(fetchImpl, url, init, requestBody, call, config, init.signal, dependencies);
-        stats.fetchChunks += fetched.chunks;
-        requestBody = appendToolResult(requestBody, result, call, fetched.text, false, config);
-      } catch (error) {
-        if (init.signal?.aborted) throw error;
-        stats.fetchFailures += 1;
-        requestBody = appendToolResult(requestBody, result, call, `Managed WebFetch failed: ${error instanceof Error ? error.message : String(error)}`, true, config);
+      for (const call of overflow) {
+        stats.fetchLimitReached = true;
+        const entry = { call, content: 'Managed WebFetch batch limit reached. Continue without this page fetch.', isError: true };
+        results[managed.calls.indexOf(call)] = entry;
+        await emitProgress(entry);
+      }
+      requestBody = appendToolResults(requestBody, result, results, config);
+      if (limited.length > 0 || overflow.length > 0) {
+        requestBody = removeManagedTools(requestBody, config, 'fetch');
+        limitContinuation = true;
       }
     }
   };

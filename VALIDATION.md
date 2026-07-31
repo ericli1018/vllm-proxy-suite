@@ -1,80 +1,71 @@
-# VLLM-PROXY-SUITE v0.7.0 Validation
+# VLLM-PROXY-SUITE v0.7.1 Validation
 
 Validation date: 2026-07-31
 
 ## Scope
 
-This validation covers the single-process JavaScript Gateway, Managed WebSearch, Managed WebFetch document reading, internal no-thinking requests, HTML/text/PDF extraction, Anthropic/OpenAI regression behavior, Compose packaging, and clean extraction.
+This validation covers homogeneous Managed WebSearch/WebFetch batches, bounded internal queues, per-item completion progress, immediate Anthropic SSE ping delivery, Tool ID preservation, no-thinking internal requests, existing WebFetch document reading, both protocol runtimes, Compose packaging, and clean extraction.
 
 ## Source verification
 
-- `npm test`: 230 passed, 0 failed.
+- `npm test`: 234 passed, 0 failed.
 - `npm run check`: passed.
-- JavaScript syntax: 58 files passed `node --check`.
-- Package validator: `valid:true`, version `0.7.0`, 71 files, 43 required files.
+- JavaScript syntax: 59 files passed `node --check`.
+- Package validator: `valid:true`, version `0.7.1`, 72 files, 43 required files.
 - Compose YAML parsed with services `vllm-proxy-suite` and `searxng`.
-- Compose defaults expose `CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED=false`, `MANAGED_WEB_TOOLS_THINK=false`, and `WEBFETCH_PDF_PAGES_PER_CHUNK=1`.
-- Gateway embedded Compose startup command passed `sh -n`.
-- Dockerfile and Compose runtime both install `poppler-utils`.
-- A real two-page PDF generated in the validation host was extracted by the default `pdftotext -layout` implementation; exactly two page Reader requests were produced and both carried `think:false`.
+- Compose exposes `MANAGED_WEB_TOOLS_MAX_BATCH=8`, `WEBSEARCH_MAX_PARALLEL=2`, and `WEBFETCH_MAX_PARALLEL=2` defaults.
+- Embedded Gateway Compose startup command passed `sh -n` after Compose interpolation normalization.
 - Gateway smoke: `/health/live`, `/health/ready`, `/health/cc`, `/health/openai`, and `/metrics` passed.
-- Managed WebFetch execution/failure/limit/chunk metrics were present.
+- New queue metrics were present.
 - Graceful SIGTERM: process exit code 0.
 
-## Managed WebSearch no-thinking behavior verified
+## Managed queue behavior verified
 
-- A managed WebSearch result is appended as a standard Anthropic `tool_result`.
-- The internal continuation request carries top-level `think:false`.
-- The same request carries `chat_template_kwargs.enable_thinking=false`.
-- Existing Chat Template kwargs are preserved.
-- The outer Claude Code request remains independently controlled by `DEFAULT_ENABLE_THINKING`.
+- A homogeneous batch of parallel WebSearch calls is intercepted and not delivered to Claude Code.
+- A homogeneous batch of parallel WebFetch calls is intercepted and not delivered to Claude Code.
+- Queue execution is bounded by the configured per-kind parallel limit.
+- Faster items can complete before earlier items.
+- Every completed item immediately emits a progress callback and a standard Anthropic `event: ping` frame on streaming requests.
+- The first SSE headers and ping are delivered before a slower sibling item completes.
+- Progress completion resets attempt activity timing and uses state `managed_tool_executing`.
+- Tool Results are assembled in original assistant Tool Call order and preserve every original `tool_use_id`.
+- One protocol-correct model continuation occurs after all Tool Results from the assistant turn are available.
+- Mixed Managed/Client Tool batches remain passthrough.
+- Batch overflow and use-limit items become internal error Tool Results instead of escaping to Claude Code.
 
-## Managed WebFetch behavior verified
+## No-thinking behavior verified
 
-- Exactly one configured WebFetch call is hidden from Claude Code and handled internally.
-- Missing `url` or `prompt` becomes an internal `is_error:true` tool_result instead of a client-visible invalid call.
-- HTML active content and tags are removed before text extraction.
-- HTML/plain text is chunked with bounded overlap and chunk count.
-- PDF page boundaries are retained; trailing empty form-feed pages are removed.
-- Default PDF behavior is one page per Reader request; grouping is configurable.
-- Every redirect is DNS-revalidated and private/link-local/metadata destinations are rejected before the next fetch.
-- Download bytes, extracted characters, prompt length, redirect count, PDF pages, Reader chunks, model response, synthesis input, and final result bytes are bounded.
-- Chunk Reader and Document Synthesizer requests are non-streaming and tool-free.
-- Chunk Reader, Document Synthesizer, and final WebFetch continuation carry `think:false` and `enable_thinking:false` by default.
-- Only bounded summary/evidence is returned to the original model; full documents are not appended to the main Claude Code conversation.
-- Mixed or parallel WebFetch/client-tool responses are passed through unchanged.
-- WebFetch execution, failure, limit, and chunk metrics are exported.
+- Managed WebSearch continuations carry `think:false` and `chat_template_kwargs.enable_thinking=false`.
+- Managed WebFetch Chunk Readers, Document Synthesizers, and continuations carry the same no-thinking policy.
+- Parallel Managed WebFetch work preserves the no-thinking policy for every internal model request.
+- The outer Claude Code request remains controlled independently by `DEFAULT_ENABLE_THINKING`.
 
-## Security boundaries verified
+## Observability verified
 
-- Only HTTP and HTTPS URLs are accepted.
-- URL credentials are rejected.
-- Loopback, RFC1918, carrier-grade NAT, link-local, metadata, IPv6 ULA/link-local, multicast, and selected reserved/documentation ranges are rejected.
-- Redirect targets are checked before the redirect request is issued.
-- Unsupported MIME types are rejected.
-- Fetched content is labeled as untrusted external data in Reader and final tool-result prompts.
+- Per-item event: `managed_tool_item_completed`.
+- Metrics:
+  - `vllm_cc_proxy_managed_web_tool_items_completed_total`
+  - `vllm_cc_proxy_managed_web_tool_progress_pings_total`
+- Per-item logs contain Tool ID/name, completion count, success state, and duration, but not query, URL, snippet, fetched document, or Tool Result content.
+- SSE progress frames are standard ping events and do not expose internal Tool Results or create visible Claude Code Tool rows.
 
-## Clean ZIP verification
+## Clean candidate ZIP verification
 
-- Clean extraction `npm test`: 230 passed, 0 failed.
+- Clean extraction `npm test`: 234 passed, 0 failed.
 - Clean extraction `npm run check`: passed.
-- JavaScript syntax: 58 files passed.
-- Package validator: `valid:true`, 71 files, 43 required files.
-- Compose parsed with `vllm-proxy-suite` and `searxng`; no-thinking and one-page PDF defaults were preserved.
-- Real `pdftotext` PDF smoke produced exactly two Reader requests for a two-page PDF; both used `think:false`.
-- Gateway health and Managed WebFetch metrics smoke passed.
-- Graceful SIGTERM: exit code 0.
-- Source and clean-ZIP SHA-256 manifests: identical.
+- JavaScript syntax: 59 files passed.
+- Package validator: `valid:true`, version `0.7.1`, 72 files, 43 required files.
+- Compose batch/parallel defaults were preserved.
+- Source and clean-candidate SHA-256 manifests were identical.
 - ZIP root: exactly `VLLM-PROXY-SUITE/`.
 
 ## Not executed in this environment
 
 - Live Claude Code → Gateway → target vLLM → SearXNG/public-web execution.
-- Docker image build or real Docker Compose container startup; Docker CLI is unavailable.
-- JavaScript browser rendering, authenticated sites, CAPTCHA bypass, or anti-bot circumvention.
-- Production concurrency, long-duration load, and external failure injection.
-- Anthropic Hosted WebSearch/WebFetch emulation, encrypted content, or native citation generation.
+- Docker image build or real Docker Compose startup; Docker CLI is unavailable.
+- Production concurrency, long-duration load, and external network failure injection.
+- Visible Claude Code UI rendering of ping frames; protocol tests verify the bytes, while Claude Code normally treats them as non-visible keepalive events.
 
-## Residual limitation
+## Protocol constraint
 
-Hostnames are resolved and checked before each fetch and redirect, but the current fetch transport does not pin the validated address. Deployments requiring DNS-rebinding resistance should enforce outbound egress policy or use a controlled outbound HTTP proxy.
+A Tool Result from a Proxy-managed Tool cannot be sent to Claude Code as a client Tool Result without transferring Tool ownership to Claude Code. For multiple Tool Calls in one assistant turn, the internal model continuation is therefore delayed until every corresponding Tool Result is available. v0.7.1 sends immediate SSE ping progress for each completed queue item to prevent silent waiting and timeout while preserving Anthropic Tool ID/role semantics.

@@ -56,6 +56,8 @@ function createMetrics() {
     managedWebFetchFailuresTotal: 0,
     managedWebFetchLimitsTotal: 0,
     managedWebFetchChunksTotal: 0,
+    managedWebToolItemsCompletedTotal: 0,
+    managedWebToolProgressPingsTotal: 0,
   };
 }
 
@@ -462,6 +464,25 @@ export function createProtocolProxyRuntime({
       };
       const streaming = Boolean(firstBody.stream);
       const heartbeat = streaming ? startHeartbeat(response, config.heartbeatIntervalMs) : null;
+      let managedProgressWrite = Promise.resolve();
+      const deliverManagedProgress = streaming
+        ? (event = {}) => {
+          managedProgressWrite = managedProgressWrite.then(async () => {
+            if (response.destroyed || response.writableEnded) return;
+            if (!response.headersSent) {
+              response.writeHead(200, {
+                'content-type': 'text/event-stream; charset=utf-8',
+                'cache-control': 'no-cache, no-store',
+                connection: 'keep-alive',
+                'x-accel-buffering': 'no',
+              });
+            }
+            await writeResponseChunk(response, Buffer.from('event: ping\ndata: {"type":"ping"}\n\n'));
+            metrics.managedWebToolProgressPingsTotal += 1;
+          });
+          return managedProgressWrite;
+        }
+        : null;
       let toolPassthroughDelivery = null;
       const createToolPassthrough = (attemptNumber, phase) => {
         if (!route.transparentToolPassthrough) return null;
@@ -538,6 +559,20 @@ export function createProtocolProxyRuntime({
         return {
           ...(traceEnabled ? { onChunk(snapshot) { requestLogger.trace('upstream_chunk', { ...snapshot, phase }); } } : {}),
           ...(debugEnabled ? { onState(snapshot) { requestLogger.debug('request_state_changed', { ...snapshot, phase }); } } : {}),
+          onManagedProgress(event) {
+            metrics.managedWebToolItemsCompletedTotal += 1;
+            requestLogger.info('managed_tool_item_completed', {
+              attempt: attemptNumber,
+              phase,
+              kind: event.kind || null,
+              toolUseId: event.toolUseId || null,
+              toolName: event.toolName || null,
+              ok: event.ok !== false,
+              completed: event.completed ?? null,
+              total: event.total ?? null,
+              durationMs: event.durationMs ?? null,
+            });
+          },
           ...((debugEnabled || warnEnabled) ? {
             onProgress(snapshot) {
               const progress = { ...snapshot, phase };
@@ -568,6 +603,7 @@ export function createProtocolProxyRuntime({
         bufferBudget: budget,
         clientSignal: clientController.signal,
         behaviorGuardsEnabled: route.behaviorGuardsEnabled !== false,
+        managedProgress: deliverManagedProgress,
       };
 
       const finalizeRouteAttempt = (attempt, attemptNumber, phase) => {

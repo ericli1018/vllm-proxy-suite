@@ -295,7 +295,11 @@ function validateBlocks(result, config, requireTerminal) {
     }
   }
   if (tools > config.maxToolCalls) return invalid('too_many_tool_calls', 'too_many_tool_calls', { retryable: false, diagnostics: collectToolBlockDiagnostics(result.blocks) });
-  if (requireTerminal && tools > 0 && result.stopReason !== 'tool_use') return invalid('tool_stop_reason_mismatch');
+  if (requireTerminal && tools > 0 && result.stopReason !== 'tool_use') {
+    const normalizable = config.claudeCodeToolStopReasonNormalizationEnabled === true
+      && result.stopReason === 'end_turn';
+    if (!normalizable) return invalid('tool_stop_reason_mismatch');
+  }
   if (!hasOutput) return invalid('thinking_without_output');
   return { ok: true };
 }
@@ -324,6 +328,76 @@ function normalizeNonStream(payload) {
     error: payload?.type === 'error' ? payload.error : null,
     structuralErrors: [],
     eventCount: 1,
+  };
+}
+
+
+function rewriteStreamingStopReason(rawBody, fromStopReason, toStopReason) {
+  const source = rawBody.toString('utf8');
+  let changed = 0;
+  const rewritten = source.replace(/(^|\n)data:\s*(\{[^\n]*\})(?=\r?\n|$)/g, (frame, prefix, jsonText) => {
+    let payload;
+    try {
+      payload = JSON.parse(jsonText);
+    } catch {
+      return frame;
+    }
+    if (payload?.type !== 'message_delta' || payload?.delta?.stop_reason !== fromStopReason) return frame;
+    payload.delta.stop_reason = toStopReason;
+    changed += 1;
+    return `${prefix}data: ${JSON.stringify(payload)}`;
+  });
+  return { rawBody: Buffer.from(rewritten, 'utf8'), changed };
+}
+
+function rewriteJsonStopReason(rawBody, fromStopReason, toStopReason) {
+  let payload;
+  try {
+    payload = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return { rawBody, changed: 0 };
+  }
+  if (payload?.stop_reason !== fromStopReason) return { rawBody, changed: 0 };
+  payload.stop_reason = toStopReason;
+  return { rawBody: Buffer.from(JSON.stringify(payload), 'utf8'), changed: 1 };
+}
+
+export function normalizeAnthropicToolStopReason(attempt, {
+  fromStopReason = 'end_turn',
+  toStopReason = 'tool_use',
+} = {}) {
+  const result = attempt?.result;
+  const rawBody = attempt?.rawBody;
+  const toolCallCount = Array.isArray(result?.blocks)
+    ? result.blocks.filter((block) => block?.type === 'tool_use').length
+    : 0;
+  if (!Buffer.isBuffer(rawBody) || !result || toolCallCount === 0 || result.stopReason !== fromStopReason) {
+    return { applied: false, fromStopReason, toStopReason, toolCallCount };
+  }
+
+  const streaming = !result.payload;
+  const rewritten = streaming
+    ? rewriteStreamingStopReason(rawBody, fromStopReason, toStopReason)
+    : rewriteJsonStopReason(rawBody, fromStopReason, toStopReason);
+  if (rewritten.changed !== 1) {
+    return { applied: false, fromStopReason, toStopReason, toolCallCount, rewrittenEvents: rewritten.changed };
+  }
+
+  attempt.rawBody = rewritten.rawBody;
+  result.stopReason = toStopReason;
+  if (result.messageDelta?.delta) result.messageDelta.delta.stop_reason = toStopReason;
+  if (result.payload) result.payload.stop_reason = toStopReason;
+  if (result.semanticMetrics) result.semanticMetrics.stopReason = toStopReason;
+  if (attempt.semanticMetrics) attempt.semanticMetrics.stopReason = toStopReason;
+
+  return {
+    applied: true,
+    fromStopReason,
+    toStopReason,
+    toolCallCount,
+    rewrittenEvents: rewritten.changed,
+    rawBytesBefore: rawBody.length,
+    rawBytesAfter: rewritten.rawBody.length,
   };
 }
 

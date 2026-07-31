@@ -51,6 +51,7 @@ function createMetrics() {
     placeholderRecoveriesFusedTotal: 0,
     targetlessToolRecoveriesDetectedTotal: 0,
     targetlessToolRecoveriesFusedTotal: 0,
+    toolStopReasonNormalizationsTotal: 0,
     hostedToolsFilteredTotal: 0,
     requiredHostedToolsRejectedTotal: 0,
     malformedToolRetriesTotal: 0,
@@ -464,6 +465,21 @@ export function createProtocolProxyRuntime({
         logger: requestLogger,
         config,
       });
+      const recordAttemptNormalization = (validation, attemptNumber, recovery) => {
+        const normalization = validation?.normalization;
+        if (!normalization?.applied) return;
+        metrics.toolStopReasonNormalizationsTotal += 1;
+        requestLogger.info('tool_stop_reason_normalized', {
+          attempt: attemptNumber,
+          phase: recovery ? 'recovery' : 'initial',
+          fromStopReason: normalization.fromStopReason,
+          toStopReason: normalization.toStopReason,
+          toolCallCount: normalization.toolCallCount,
+          rewrittenEvents: normalization.rewrittenEvents,
+          rawBytesBefore: normalization.rawBytesBefore,
+          rawBytesAfter: normalization.rawBytesAfter,
+        });
+      };
       const recordActionlessCompletion = (validation, attemptNumber, recovery) => {
         const targetlessToolRecovery = validation?.reason === 'invalid_claude_code_tool_input'
           && validation?.diagnostics?.targetlessToolRecovery === true;
@@ -782,6 +798,7 @@ export function createProtocolProxyRuntime({
       attempt = finalizeRouteAttempt(attempt, 1, 'initial');
       if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateAttempt) {
         const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody, config });
+        if (semanticValidation.ok) recordAttemptNormalization(semanticValidation, 1, false);
         if (!semanticValidation.ok) {
           recordActionlessCompletion(semanticValidation, 1, false);
           attempt = {
@@ -851,6 +868,7 @@ export function createProtocolProxyRuntime({
         }
         if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateAttempt) {
           const semanticValidation = route.validateAttempt(attempt, { originalBody, firstBody: recovery.body, config, recovery: true });
+          if (semanticValidation.ok) recordAttemptNormalization(semanticValidation, 2, true);
           if (!semanticValidation.ok) {
             recordActionlessCompletion(semanticValidation, 2, true);
             attempt = {

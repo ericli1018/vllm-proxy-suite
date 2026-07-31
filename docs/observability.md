@@ -636,6 +636,22 @@ forcedToolChoice=false
 
 A second targetless invalid mutation logs `targetless_tool_recovery_fused` with `retryable=false`.
 
+A schema-valid Tool Call that arrives with an incorrect `end_turn` terminal logs:
+
+```text
+tool_stop_reason_normalized
+attempt=1|2
+phase="initial|recovery"
+fromStopReason="end_turn"
+toStopReason="tool_use"
+toolCallCount=...
+rewrittenEvents=1
+rawBytesBefore=...
+rawBytesAfter=...
+```
+
+This event is emitted only after the actual buffered response and parsed completion state have both been rewritten. Invalid Tool input does not emit this event.
+
 Prometheus counters:
 
 ```text
@@ -646,6 +662,7 @@ vllm_cc_proxy_placeholder_completions_detected_total
 vllm_cc_proxy_placeholder_recoveries_fused_total
 vllm_cc_proxy_targetless_tool_recoveries_detected_total
 vllm_cc_proxy_targetless_tool_recoveries_fused_total
+vllm_cc_proxy_tool_stop_reason_normalizations_total
 ```
 
 ## Responses Hosted Tool and malformed-tool diagnostics

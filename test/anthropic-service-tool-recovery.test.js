@@ -29,6 +29,7 @@ test('Anthropic service enables Claude Code tool recovery by default and permits
   const enabled = loadAnthropicConfig({});
   assert.equal(enabled.claudeCodeToolRecoveryEnabled, true);
   assert.equal(enabled.claudeCodeActionIntentGuardEnabled, true);
+  assert.equal(enabled.claudeCodeToolStopReasonNormalizationEnabled, true);
   assert.equal(enabled.claudeCodeEditRecoveryEnabled, true);
   assert.equal(enabled.claudeCodeWriteRecoveryEnabled, true);
   assert.equal(enabled.claudeCodeNotebookEditRecoveryEnabled, true);
@@ -37,6 +38,7 @@ test('Anthropic service enables Claude Code tool recovery by default and permits
   const disabled = loadAnthropicConfig({
     CLAUDE_CODE_TOOL_RECOVERY_ENABLED: 'false',
     CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED: 'false',
+    CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED: 'false',
     CLAUDE_CODE_EDIT_RECOVERY_ENABLED: 'false',
     CLAUDE_CODE_WRITE_RECOVERY_ENABLED: 'false',
     CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED: 'false',
@@ -44,6 +46,7 @@ test('Anthropic service enables Claude Code tool recovery by default and permits
   });
   assert.equal(disabled.claudeCodeToolRecoveryEnabled, false);
   assert.equal(disabled.claudeCodeActionIntentGuardEnabled, false);
+  assert.equal(disabled.claudeCodeToolStopReasonNormalizationEnabled, false);
   assert.equal(disabled.claudeCodeEditRecoveryEnabled, false);
   assert.equal(disabled.claudeCodeWriteRecoveryEnabled, false);
   assert.equal(disabled.claudeCodeNotebookEditRecoveryEnabled, false);

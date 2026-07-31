@@ -661,6 +661,8 @@ retryable=false
 
 初次命中會丟棄佔位 Attempt，使用同一個 Output-Required Recovery slot，保留原 `tools[]` 與 `tool_choice`；`auto` 仍為 `auto`。Recovery 可產生實質文字、適當 Tool Call 或一個真正阻塞問題。若第二次仍是佔位文字，Proxy 回傳同一原因且 `retryable=false`，避免 Claude Code 進入 API retry cascade。可用 `CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED=false` 停用此 Guard。
 
+當模型已產生完整 `tool_use` block，但錯誤以 `stop_reason="end_turn"` 結束時，Proxy 不會直接忽略協議矛盾。只有在所有 Tool Call JSON 完整、Tool 名稱存在於本次 `tools[]`，且輸入通過該 Tool 的 `input_schema` 後，才會將實際 SSE／JSON 的 `end_turn` 正規化為 `tool_use` 並繼續既有語意驗證與 Recovery target 驗證。未知 Tool、缺少必要欄位、型別錯誤、Malformed JSON、未閉合 block 或失敗終止都不會被正規化。成功時記錄 `tool_stop_reason_normalized`；可用 `CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED=false` 恢復嚴格拒絕。
+
 ## Claude Code Tool Recovery
 
 Anthropic runtime 以本次 request 的 `tools[]` 與 `input_schema` 為執行期權威，處理：
@@ -810,6 +812,7 @@ targetless_tool_recovery_fused
 | `CLAUDE_CODE_TOOL_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED` | `true`；阻擋立即行動宣告後無 Tool Call 的 `end_turn` |
 | `CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED` | `true`；阻擋 Tool Result 後只有 `No response`／`No output` 類佔位內容的 `end_turn` |
+| `CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED` | `true`；僅將完整且 schema-valid Tool Call 的錯誤 `end_turn` 改寫為 `tool_use` |
 | `CLAUDE_CODE_EDIT_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_WRITE_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED` | `true` |

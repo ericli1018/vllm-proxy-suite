@@ -146,6 +146,31 @@ invalid mutation + no exact target
 → repeated invalid targetless mutation: fused
 ```
 
+## Claude Code Tool stop-reason normalization
+
+A Tool block and its terminal stop reason are validated as one protocol transition. When a buffered Anthropic response contains at least one complete Tool Call but terminates with `stop_reason="end_turn"`, normalization is allowed only when all of the following hold:
+
+- normalization is enabled;
+- every Tool block is closed and its JSON parsed successfully;
+- every Tool name exists in the request `tools[]`;
+- every Tool input satisfies the exposed `input_schema`, including required fields, primitive types, enums, and constants;
+- the response terminal is otherwise complete and successful.
+
+The Proxy rewrites the actual buffered SSE `message_delta` or non-stream JSON payload to `tool_use`, updates parsed completion diagnostics, and then runs the ordinary Tool Recovery and target-lock validation. Initial and Recovery attempts use the same rule.
+
+```text
+valid Tool Call + end_turn
+→ rewrite buffered protocol terminal to tool_use
+→ continue semantic and target validation
+→ replay
+
+invalid or incomplete Tool Call + end_turn
+→ no normalization
+→ tool_stop_reason_mismatch or the more specific structural error
+```
+
+Malformed JSON, unknown Tools, schema-invalid input, excessive Tool Calls, unclosed blocks, cancellation, and failure terminals remain fail-closed. `CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED=false` disables the rewrite and preserves strict mismatch rejection.
+
 ## Deterministic Tool JSON failures
 
 The targetless mutation path above is a narrow exception for a fully parsed mutation object that lacks a safe target. Malformed JSON, oversized arguments, excessive Tool Calls, and unrelated deterministic Tool structure failures are not generically retried.

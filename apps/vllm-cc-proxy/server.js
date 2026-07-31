@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import { loadCommonConfig, parseBoolean, parseCsv, trimTrailingSlash } from '../../packages/core/config.js';
-import { anthropicMessagesAdapter, applyAnthropicRequestPolicy, buildAnthropicRecoveryRequest } from '../../packages/anthropic/messages.js';
+import { anthropicMessagesAdapter, applyAnthropicRequestPolicy, buildAnthropicRecoveryRequest, normalizeAnthropicToolStopReason } from '../../packages/anthropic/messages.js';
 import {
   analyzeClaudeCodeToolAttempt,
   buildClaudeCodeToolRecovery,
   isTargetlessClaudeCodeToolRecoveryIssue,
   validateClaudeCodeToolRecovery,
+  validateExposedClaudeCodeToolCalls,
 } from '../../packages/anthropic/claude-code-tools/recovery.js';
 import { createProtocolProxyRuntime } from '../../packages/server/create-proxy-server.js';
 import { createAnthropicManagedWebToolsFetch } from '../../packages/anthropic/managed-web-tools.js';
@@ -49,6 +50,7 @@ export function loadAnthropicConfig(env = process.env) {
     claudeCodeToolRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_RECOVERY_ENABLED, true),
     claudeCodeActionIntentGuardEnabled: parseBoolean(env.CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED, true),
     claudeCodePlaceholderCompletionGuardEnabled: parseBoolean(env.CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED, true),
+    claudeCodeToolStopReasonNormalizationEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED, true),
     claudeCodeEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_EDIT_RECOVERY_ENABLED, true),
     claudeCodeWriteRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_WRITE_RECOVERY_ENABLED, true),
     claudeCodeNotebookEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED, true),
@@ -148,22 +150,65 @@ export function createAnthropicGuardedRoute(config, options = {}) {
         return toolValidation;
       }
       const completion = anthropicMessagesAdapter.completionDiagnostics(attempt.result);
+      let normalization = null;
+      if (
+        config.claudeCodeToolStopReasonNormalizationEnabled
+        && completion.stopReason === 'end_turn'
+        && output.toolCalls.length > 0
+      ) {
+        const exposedToolValidation = validateExposedClaudeCodeToolCalls({ request: originalBody, output });
+        if (!exposedToolValidation.ok) {
+          return {
+            ok: false,
+            reason: 'tool_stop_reason_mismatch',
+            detail: 'Tool stop reason cannot be normalized because the Tool Call is not fully valid.',
+            retryable: false,
+            diagnostics: {
+              messageStopped: completion.messageStopped,
+              stopReason: completion.stopReason,
+              toolCallCount: output.toolCalls.length,
+              toolNames: output.toolCalls.map((call) => call.name),
+              toolValidationReason: exposedToolValidation.reason,
+              toolValidationDetail: exposedToolValidation.detail,
+            },
+          };
+        }
+        normalization = normalizeAnthropicToolStopReason(attempt);
+        if (!normalization.applied) {
+          return {
+            ok: false,
+            reason: 'tool_stop_reason_mismatch',
+            detail: 'Validated Tool Call stop reason could not be rewritten safely.',
+            retryable: false,
+            diagnostics: {
+              messageStopped: completion.messageStopped,
+              stopReason: completion.stopReason,
+              toolCallCount: output.toolCalls.length,
+              toolNames: output.toolCalls.map((call) => call.name),
+              normalizationRewriteFailed: true,
+              ...normalization,
+            },
+          };
+        }
+      }
+      const normalizedCompletion = anthropicMessagesAdapter.completionDiagnostics(attempt.result);
       if (config.claudeCodePlaceholderCompletionGuardEnabled) {
         const placeholderValidation = detectAnthropicPlaceholderCompletionWithoutProgress({
           requestBody: firstBody || originalBody,
           output,
-          completion,
+          completion: normalizedCompletion,
           recovery,
         });
         if (!placeholderValidation.ok) return placeholderValidation;
       }
-      if (!config.claudeCodeActionIntentGuardEnabled) return { ok: true };
-      return detectAnthropicActionIntentWithoutToolCall({
+      if (!config.claudeCodeActionIntentGuardEnabled) return { ok: true, normalization };
+      const actionValidation = detectAnthropicActionIntentWithoutToolCall({
         requestBody: firstBody || originalBody,
         output,
-        completion,
+        completion: normalizedCompletion,
         recovery,
       });
+      return actionValidation.ok ? { ...actionValidation, normalization } : actionValidation;
     },
     classifyAttempt(attempt, { phase, recovery }) {
       if (

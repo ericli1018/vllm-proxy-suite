@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.8 - 2026-07-31
+
+- Added guarded Anthropic Tool stop-reason normalization for complete, schema-valid Tool Calls that incorrectly terminate with `stop_reason="end_turn"`.
+- Normalization is applied consistently to initial and Recovery attempts only after the Tool name is exposed by the request and every Tool input satisfies the runtime `tools[].input_schema` contract.
+- The Proxy rewrites the actual buffered Anthropic SSE or JSON response from `end_turn` to `tool_use`, updates parsed completion diagnostics, and then performs the normal Recovery-target validation before replay.
+- Malformed Tool JSON, unknown Tools, missing required fields, invalid types, excessive calls, unclosed blocks, cancellation, and failure terminals remain non-normalizable and fail closed.
+- Added `CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED`, the `tool_stop_reason_normalized` lifecycle event, a Prometheus counter, focused initial/Recovery regressions, deployment validation, and documentation.
+
 ## 0.7.7 - 2026-07-31
 
 - Split invalid Claude Code mutation Tool recovery by target availability: only issues with an exact `file_path` or `notebook_path` enter the existing locked-target Recovery.

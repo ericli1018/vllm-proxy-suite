@@ -107,6 +107,29 @@ function validateAgainstToolSchema(tool, input) {
   return { ok: true };
 }
 
+export function validateExposedClaudeCodeToolCalls({ request, output }) {
+  const calls = Array.isArray(output?.toolCalls) ? output.toolCalls : [];
+  if (calls.length === 0) return { ok: true, toolCallCount: 0, toolNames: [] };
+  for (const call of calls) {
+    const tool = toolByName(request, call?.name);
+    const validation = validateAgainstToolSchema(tool, call?.parsedArguments);
+    if (!validation.ok) {
+      return {
+        ...validation,
+        context: {
+          toolName: call?.name || null,
+          toolCallId: call?.id || null,
+        },
+      };
+    }
+  }
+  return {
+    ok: true,
+    toolCallCount: calls.length,
+    toolNames: calls.map((call) => call.name),
+  };
+}
+
 function isMutationTool(name) {
   return [TOOL_NAMES.EDIT, TOOL_NAMES.WRITE, TOOL_NAMES.NOTEBOOK_EDIT].includes(name);
 }

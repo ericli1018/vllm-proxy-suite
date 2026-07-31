@@ -657,6 +657,10 @@ retryable=false
 
 因此短指令 `繼續`、`開始`、`proceed` 或 `go ahead` 不會再單獨觸發強制 Tool Call。若第二次仍只有 Thinking，Proxy 保留 `reason="thinking_without_output"` 並回傳 `retryable=false`，避免 Claude Code 反覆重送；若 Recovery 產生有效可見文字，則正常交付給使用者。一般規劃、步驟說明、完成報告與等待使用者確認均屬合法文字輸出。可用 `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED=false` 停用 Action-Intent Guard；Output-Required Recovery 仍屬通用輸出完整性處理。
 
+當最新輸入是 Claude Code `tool_result`，而模型只輸出精確佔位文字 `No response`、`No output`、`無回應`、`沒有回應`、`無輸出` 或 `沒有輸出` 並以 `end_turn` 結束時，Proxy 將其分類為 `placeholder_completion_without_progress`。完整句子（例如 `No response was received from the server.`）、一般短回答及非 Tool Result 回合不會命中。
+
+初次命中會丟棄佔位 Attempt，使用同一個 Output-Required Recovery slot，保留原 `tools[]` 與 `tool_choice`；`auto` 仍為 `auto`。Recovery 可產生實質文字、適當 Tool Call 或一個真正阻塞問題。若第二次仍是佔位文字，Proxy 回傳同一原因且 `retryable=false`，避免 Claude Code 進入 API retry cascade。可用 `CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED=false` 停用此 Guard。
+
 ## Claude Code Tool Recovery
 
 Anthropic runtime 以本次 request 的 `tools[]` 與 `input_schema` 為執行期權威，處理：
@@ -779,6 +783,7 @@ Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前�
 |---|---:|
 | `CLAUDE_CODE_TOOL_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED` | `true`；阻擋立即行動宣告後無 Tool Call 的 `end_turn` |
+| `CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED` | `true`；阻擋 Tool Result 後只有 `No response`／`No output` 類佔位內容的 `end_turn` |
 | `CLAUDE_CODE_EDIT_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_WRITE_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED` | `true` |

@@ -54,6 +54,7 @@ const required = [
   'test/anthropic-managed-stream-envelope-v072.test.js',
   'test/anthropic-managed-visible-progress-v073.test.js',
   'test/anthropic-action-intent-v074.test.js',
+  'test/anthropic-placeholder-completion-v076.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -78,7 +79,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.5') errors.push('package.json version must be 0.7.5');
+if (packageJson.version !== '0.7.6') errors.push('package.json version must be 0.7.6');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -123,6 +124,7 @@ if (!compose.includes('RESPONSES_MALFORMED_TOOL_RETRY_ENABLED')) errors.push('Co
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RECOVERY_MIN_TOKENS')) errors.push('Compose must expose malformed-tool minimum token budget');
 if (!compose.includes('RESPONSES_MALFORMED_TOOL_RECOVERY_TEMPERATURE_MAX')) errors.push('Compose must expose malformed-tool recovery temperature cap');
 if (!compose.includes('CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED')) errors.push('Compose must expose the Claude Code Action-Intent guard switch');
+if (!compose.includes('CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED')) errors.push('Compose must expose the Claude Code placeholder-completion guard switch');
 if (!compose.includes('CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED')) errors.push('Compose must expose the Claude Code WebSearch bridge switch');
 if (!compose.includes('SEARXNG_BASE_URL')) errors.push('Compose must expose the SearXNG base URL');
 if (!compose.includes('SEARXNG_MAX_USES')) errors.push('Compose must expose the SearXNG use limit');
@@ -163,6 +165,7 @@ if (!anthropicRuntime.includes('managed_websearch_completed')) errors.push('Anth
 if (!anthropicRuntime.includes('managed_webfetch_completed')) errors.push('Anthropic runtime must observe managed WebFetch lifecycle');
 if (!anthropicRuntime.includes('managedStreamEnvelopeEnabled')) errors.push('Anthropic runtime must enable managed stream envelopes');
 if (!anthropicRuntime.includes('detectAnthropicActionIntentWithoutToolCall')) errors.push('Anthropic runtime must enable Action-Intent detection');
+if (!anthropicRuntime.includes('detectAnthropicPlaceholderCompletionWithoutProgress')) errors.push('Anthropic runtime must enable placeholder-completion detection');
 if (!anthropicRuntime.includes('buildAnthropicActionRequiredRecovery')) errors.push('Anthropic runtime must enable Action-Intent Recovery');
 if (!anthropicRuntime.includes('buildAnthropicOutputRequiredRecovery')) errors.push('Anthropic runtime must enable output-required Recovery');
 if (!anthropicRuntime.includes('validateAnthropicOutputRequiredRecovery')) errors.push('Anthropic runtime must validate output-required Recovery');

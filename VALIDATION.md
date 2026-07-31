@@ -1,18 +1,18 @@
-# VLLM-PROXY-SUITE v0.7.5 Validation
+# VLLM-PROXY-SUITE v0.7.6 Validation
 
 Validation date: 2026-07-31
 
 ## Scope
 
-This release corrects the Anthropic semantic Recovery boundary introduced in v0.7.4. A terminal `thinking_without_output` response now enters Output-Required Recovery without implying that a Tool Call is mandatory. The original Anthropic Tool choice is preserved, so `tool_choice={type:"auto"}` remains `auto` and the model may produce valid user-facing text, ask one blocking question, or call a Tool when external action is actually required.
+This release adds a conservative Anthropic placeholder-completion boundary. After a latest Claude Code Tool Result, an exact `No response` or `No output` marker (including the documented Traditional Chinese equivalents) is discarded and recovered once without forcing a Tool Call. The original Anthropic Tool choice is preserved, so `tool_choice={type:"auto"}` remains `auto`.
 
 Forced `tool_choice={type:"any",disable_parallel_tool_use:true}` remains limited to `action_intent_without_tool_call`, where the model has already announced a conservative first-person immediate external action while enabled tools are available.
 
 ## Source verification
 
-- Full test suite: 256 passed, 0 failed.
+- Full test suite: 265 passed, 0 failed.
 - `npm run check`: passed.
-- Package validator: `valid:true`, version `0.7.5`, 82 files, 50 required files.
+- Package validator: `valid:true`, version `0.7.6`, 83 files, 51 required files.
 - JavaScript syntax: 66 files passed `node --check` through the package checks and focused syntax verification.
 - Compose YAML: parsed successfully.
 - Compose services: `vllm-proxy-suite`, `searxng`.
@@ -57,3 +57,16 @@ The following require the target deployment environment and were not executed in
 - Live Claude Code → Proxy → target vLLM integration.
 - Docker image build and container startup against the production model endpoint.
 - Long-running concurrency, cancellation, and memory-pressure tests.
+
+## Placeholder Completion Guard
+
+- Exact placeholder-only `end_turn` responses after a latest Tool Result are classified as `placeholder_completion_without_progress`.
+- Substantive sentences, ordinary short answers, `N/A`, and non-Tool-Result turns remain valid.
+- Recovery uses `output_required`, preserves `tool_choice`, and may return substantive text, a Tool Call, or one blocking question.
+- A repeated placeholder is fused with `retryable:false` after the single Recovery slot.
+- Lifecycle events:
+  - `placeholder_completion_without_progress_detected`
+  - `placeholder_completion_without_progress_fused`
+- Counters:
+  - `vllm_cc_proxy_placeholder_completions_detected_total`
+  - `vllm_cc_proxy_placeholder_recoveries_fused_total`

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.6 - 2026-07-31
+
+- Added the Anthropic `placeholder_completion_without_progress` guard for terminal placeholder-only replies immediately after a Claude Code Tool Result.
+- The guard conservatively matches only exact `No response`, `No output`, `無回應`, `沒有回應`, `無輸出`, and `沒有輸出` markers after punctuation and formatting normalization; substantive sentences and ordinary user turns remain untouched.
+- Placeholder responses are discarded and enter one Output-Required Recovery while preserving the original Anthropic Tool choice, including `tool_choice={type:"auto"}`.
+- Recovery may return substantive text, a Tool Call, or one blocking question. Repeating the placeholder is fused as `retryable:false` with no third Attempt.
+- Added `CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED`, dedicated lifecycle logs, Prometheus counters, focused regressions, deployment validation, and documentation.
+
 ## 0.7.5 - 2026-07-31
 
 - Split Anthropic semantic Recovery into `output_required` and `action_required` modes.

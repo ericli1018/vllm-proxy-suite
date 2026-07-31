@@ -587,12 +587,40 @@ phase="recovery"
 retryable=false
 ```
 
+When a latest Tool Result turn ends with an exact placeholder-only response:
+
+```text
+placeholder_completion_without_progress_detected
+attempt=1
+phase="initial"
+retryable=true
+latestInputKind="tool_result"
+placeholderText="no response|no output|無回應|沒有回應|無輸出|沒有輸出"
+
+recovery_request_built
+recoveryMode="output_required"
+recoveryOriginReason="placeholder_completion_without_progress"
+recoveryToolChoice="auto|any|none|tool:<name>"
+forcedToolChoice=false
+```
+
+If Recovery repeats the placeholder:
+
+```text
+placeholder_completion_without_progress_fused
+attempt=2
+phase="recovery"
+retryable=false
+```
+
 Prometheus counters:
 
 ```text
 vllm_cc_proxy_action_intent_without_tool_call_detected_total
 vllm_cc_proxy_action_intent_recoveries_fused_total
 vllm_cc_proxy_thinking_without_output_recoveries_fused_total
+vllm_cc_proxy_placeholder_completions_detected_total
+vllm_cc_proxy_placeholder_recoveries_fused_total
 ```
 
 ## Responses Hosted Tool and malformed-tool diagnostics

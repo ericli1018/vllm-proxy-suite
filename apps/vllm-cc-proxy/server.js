@@ -13,6 +13,7 @@ import {
   buildAnthropicActionRequiredRecovery,
   buildAnthropicOutputRequiredRecovery,
   detectAnthropicActionIntentWithoutToolCall,
+  detectAnthropicPlaceholderCompletionWithoutProgress,
   summarizeAnthropicExecutionContext,
   summarizeAnthropicToolContext,
   validateAnthropicActionRequiredRecovery,
@@ -46,6 +47,7 @@ export function loadAnthropicConfig(env = process.env) {
     defaultMaxTokens: positiveInteger(env.DEFAULT_MAX_TOKENS, 8192),
     claudeCodeToolRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_RECOVERY_ENABLED, true),
     claudeCodeActionIntentGuardEnabled: parseBoolean(env.CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED, true),
+    claudeCodePlaceholderCompletionGuardEnabled: parseBoolean(env.CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED, true),
     claudeCodeEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_EDIT_RECOVERY_ENABLED, true),
     claudeCodeWriteRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_WRITE_RECOVERY_ENABLED, true),
     claudeCodeNotebookEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED, true),
@@ -130,11 +132,21 @@ export function createAnthropicGuardedRoute(config, options = {}) {
         config,
       });
       if (!toolValidation.ok) return toolValidation;
+      const completion = anthropicMessagesAdapter.completionDiagnostics(attempt.result);
+      if (config.claudeCodePlaceholderCompletionGuardEnabled) {
+        const placeholderValidation = detectAnthropicPlaceholderCompletionWithoutProgress({
+          requestBody: firstBody || originalBody,
+          output,
+          completion,
+          recovery,
+        });
+        if (!placeholderValidation.ok) return placeholderValidation;
+      }
       if (!config.claudeCodeActionIntentGuardEnabled) return { ok: true };
       return detectAnthropicActionIntentWithoutToolCall({
         requestBody: firstBody || originalBody,
         output,
-        completion: anthropicMessagesAdapter.completionDiagnostics(attempt.result),
+        completion,
         recovery,
       });
     },
@@ -185,7 +197,7 @@ export function createAnthropicGuardedRoute(config, options = {}) {
           config,
         });
       }
-      if (reason?.reason === 'thinking_without_output') {
+      if (['thinking_without_output', 'placeholder_completion_without_progress'].includes(reason?.reason)) {
         return buildAnthropicOutputRequiredRecovery({
           original: originalBody,
           prepared: firstBody || applyAnthropicRequestPolicy(originalBody, config),

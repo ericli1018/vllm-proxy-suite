@@ -35,6 +35,31 @@ function latestAnthropicInput(body = {}) {
   return { kind: 'none', text: '' };
 }
 
+const ANTHROPIC_PLACEHOLDER_COMPLETIONS = new Set([
+  'no response',
+  'no output',
+  '無回應',
+  '沒有回應',
+  '無輸出',
+  '沒有輸出',
+]);
+
+function normalizePlaceholderCompletionText(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/^[`*_~"'“”‘’<>\[\](){}]+|[`*_~"'“”‘’<>\[\](){}]+$/gu, '')
+    .trim()
+    .replace(/[.!！。?？:：;；]+$/gu, '')
+    .trim()
+    .replace(/\s+/gu, ' ');
+}
+
+export function isAnthropicPlaceholderCompletionText(value) {
+  return ANTHROPIC_PLACEHOLDER_COMPLETIONS.has(normalizePlaceholderCompletionText(value));
+}
+
 export function summarizeAnthropicExecutionContext(body = {}) {
   const latest = latestAnthropicInput(body);
   return {
@@ -54,6 +79,34 @@ export function summarizeAnthropicToolContext(body = {}) {
     requestToolChoice,
     requestToolsEnabled: tools.length > 0 && requestToolChoice !== 'none',
     parallelToolCallsDisabled: Boolean(body.tool_choice?.disable_parallel_tool_use),
+  };
+}
+
+export function detectAnthropicPlaceholderCompletionWithoutProgress({
+  requestBody,
+  output,
+  completion,
+  recovery = false,
+} = {}) {
+  if (!completion?.messageStopped || completion?.stopReason !== 'end_turn') return { ok: true };
+  if (Array.isArray(output?.toolCalls) && output.toolCalls.length > 0) return { ok: true };
+  const execution = summarizeAnthropicExecutionContext(requestBody);
+  if (execution.latestInputKind !== 'tool_result') return { ok: true };
+  const finalText = typeof output?.finalText === 'string' ? output.finalText.trim() : '';
+  if (!finalText || !isAnthropicPlaceholderCompletionText(finalText)) return { ok: true };
+
+  return {
+    ok: false,
+    reason: 'placeholder_completion_without_progress',
+    detail: 'The response contained only a placeholder after a Tool Result and ended without substantive output or another Tool Call.',
+    retryable: !recovery,
+    diagnostics: {
+      latestInputKind: execution.latestInputKind,
+      placeholderCompletionDetected: true,
+      placeholderText: normalizePlaceholderCompletionText(finalText),
+      finalTextChars: finalText.length,
+      placeholderRecoveryAttempted: Boolean(recovery),
+    },
   };
 }
 
@@ -120,21 +173,26 @@ function recoveryInstruction(issue) {
 }
 
 function outputRecoveryInstruction(issue) {
+  const placeholderCompletion = issue.reason === 'placeholder_completion_without_progress';
   return [
     'Recovery is expected and the original task remains solvable.',
-    'The previous response ended after reasoning without visible output or a tool call.',
+    placeholderCompletion
+      ? 'The previous response contained only a placeholder after the latest accepted Tool Result.'
+      : 'The previous response ended after reasoning without visible output or a tool call.',
     'The previous generation was discarded and did not change task or tool state.',
     'Continue from the original request and accepted prior tool results only.',
     'Do not explain the recovery or repeat hidden reasoning.',
     'Produce one valid user-visible response now.',
     'Use a supplied tool only when the task actually requires external action; otherwise answer, explain, plan, report completion, wait for confirmation, or ask one genuinely blocking question.',
-    'Do not end the turn with reasoning only.',
+    ...(placeholderCompletion
+      ? ['Do not answer with “No response”, “No output”, “無回應”, “沒有回應”, “無輸出”, “沒有輸出”, or another placeholder.']
+      : ['Do not end the turn with reasoning only.']),
     `Recovery reason: ${issue.reason}.`,
   ].join(' ');
 }
 
 export function buildAnthropicOutputRequiredRecovery({ original, prepared = null, issue, config }) {
-  if (!issue || issue.ok !== false || issue.reason !== 'thinking_without_output') {
+  if (!issue || issue.ok !== false || !['thinking_without_output', 'placeholder_completion_without_progress'].includes(issue.reason)) {
     throw new TypeError('An Anthropic output-required recovery issue is required');
   }
 
@@ -147,6 +205,7 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
     mode: 'output_required',
     originReason: issue.reason,
     candidateNames: [...toolContext.requestToolNames],
+    rejectPlaceholderCompletion: issue.reason === 'placeholder_completion_without_progress',
   };
   return {
     body,
@@ -167,18 +226,29 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
 export function validateAnthropicOutputRequiredRecovery(output, plan) {
   if (plan?.mode !== 'output_required') return { ok: true };
   const calls = Array.isArray(output?.toolCalls) ? output.toolCalls : [];
+  if (calls.length > 0) return { ok: true };
   const finalText = typeof output?.finalText === 'string' ? output.finalText.trim() : '';
-  if (calls.length > 0 || finalText) return { ok: true };
+  const repeatedPlaceholder = Boolean(
+    finalText
+    && plan.rejectPlaceholderCompletion
+    && isAnthropicPlaceholderCompletionText(finalText)
+  );
+  if (finalText && !repeatedPlaceholder) return { ok: true };
   return {
     ok: false,
     reason: plan.originReason || 'thinking_without_output',
-    detail: 'The output-required Recovery ended without visible output or a Tool Call.',
+    detail: repeatedPlaceholder
+      ? 'The output-required Recovery repeated a placeholder instead of producing substantive output or a Tool Call.'
+      : 'The output-required Recovery ended without visible output or a Tool Call.',
     retryable: false,
     diagnostics: {
       requestToolCount: Array.isArray(plan.candidateNames) ? plan.candidateNames.length : 0,
       requestToolNames: Array.isArray(plan.candidateNames) ? [...plan.candidateNames] : [],
       outputRecoveryAttempted: true,
-      finalTextChars: 0,
+      placeholderRecoveryAttempted: Boolean(plan.rejectPlaceholderCompletion),
+      placeholderCompletionDetected: repeatedPlaceholder,
+      ...(repeatedPlaceholder ? { placeholderText: normalizePlaceholderCompletionText(finalText) } : {}),
+      finalTextChars: finalText.length,
     },
   };
 }

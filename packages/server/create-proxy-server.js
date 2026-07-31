@@ -47,6 +47,8 @@ function createMetrics() {
     actionIntentWithoutToolCallDetectedTotal: 0,
     actionIntentRecoveriesFusedTotal: 0,
     thinkingWithoutOutputRecoveriesFusedTotal: 0,
+    placeholderCompletionsDetectedTotal: 0,
+    placeholderRecoveriesFusedTotal: 0,
     hostedToolsFilteredTotal: 0,
     requiredHostedToolsRejectedTotal: 0,
     malformedToolRetriesTotal: 0,
@@ -461,12 +463,16 @@ export function createProtocolProxyRuntime({
         config,
       });
       const recordActionlessCompletion = (validation, attemptNumber, recovery) => {
-        if (!['actionless_completion', 'action_intent_without_tool_call', 'thinking_without_output'].includes(validation?.reason)) return;
+        if (!['actionless_completion', 'action_intent_without_tool_call', 'thinking_without_output', 'placeholder_completion_without_progress'].includes(validation?.reason)) return;
         const anthropicActionIntent = validation.reason === 'action_intent_without_tool_call';
         const thinkingWithoutOutput = validation.reason === 'thinking_without_output';
+        const placeholderCompletion = validation.reason === 'placeholder_completion_without_progress';
         if (thinkingWithoutOutput && !recovery) return;
         if (thinkingWithoutOutput) {
           metrics.thinkingWithoutOutputRecoveriesFusedTotal += 1;
+        } else if (placeholderCompletion) {
+          metrics.placeholderCompletionsDetectedTotal += 1;
+          if (recovery) metrics.placeholderRecoveriesFusedTotal += 1;
         } else if (anthropicActionIntent) {
           metrics.actionIntentWithoutToolCallDetectedTotal += 1;
           if (recovery) metrics.actionIntentRecoveriesFusedTotal += 1;
@@ -476,9 +482,11 @@ export function createProtocolProxyRuntime({
         }
         const event = thinkingWithoutOutput
           ? 'thinking_without_output_fused'
-          : (anthropicActionIntent
-            ? (recovery ? 'action_intent_without_tool_call_fused' : 'action_intent_without_tool_call_detected')
-            : (recovery ? 'actionless_completion_fused' : 'actionless_completion_detected'));
+          : (placeholderCompletion
+            ? (recovery ? 'placeholder_completion_without_progress_fused' : 'placeholder_completion_without_progress_detected')
+            : (anthropicActionIntent
+              ? (recovery ? 'action_intent_without_tool_call_fused' : 'action_intent_without_tool_call_detected')
+              : (recovery ? 'actionless_completion_fused' : 'actionless_completion_detected')));
         requestLogger.warn(event, {
           attempt: attemptNumber,
           phase: recovery ? 'recovery' : 'initial',
@@ -829,7 +837,7 @@ export function createProtocolProxyRuntime({
           toolPassthrough: createToolPassthrough(2, 'recovery'),
         });
         attempt = finalizeRouteAttempt(attempt, 2, 'recovery', recovery);
-        if (attempt.kind !== 'success' && attempt.kind !== 'tool_passthrough' && ['action_intent_without_tool_call', 'thinking_without_output'].includes(attempt.reason)) {
+        if (attempt.kind !== 'success' && attempt.kind !== 'tool_passthrough' && ['action_intent_without_tool_call', 'thinking_without_output', 'placeholder_completion_without_progress'].includes(attempt.reason)) {
           recordActionlessCompletion(attempt, 2, true);
         }
         if (route.behaviorGuardsEnabled !== false && attempt.kind === 'success' && route.validateAttempt) {

@@ -108,6 +108,11 @@ The initial narration is discarded. Recovery preserves the original Tool set, se
 
 The Output-Required instruction permits a user-facing answer, explanation, plan, completion report, confirmation boundary, one genuinely blocking question, or a Tool Call when external action is actually necessary. It only forbids another reasoning-only terminal response. A second `thinking_without_output` is fused as the same reason with `retryable=false`, while a valid text response is delivered normally.
 
+
+A separate `placeholder_completion_without_progress` classifier applies only when the latest accepted Anthropic input is a `tool_result`, the response ends with `end_turn`, no Tool Call exists, and the entire visible response normalizes to one of the explicit placeholder markers: `No response`, `No output`, `無回應`, `沒有回應`, `無輸出`, or `沒有輸出`. It does not classify longer sentences, generic short answers, or ordinary user turns.
+
+The placeholder Attempt is discarded and uses the same Output-Required Recovery path with the original Tool choice preserved. The Recovery instruction explicitly rejects another placeholder but still permits substantive text, a Tool Call, or one blocking question. A repeated placeholder is fused as `placeholder_completion_without_progress` with `retryable=false`.
+
 Action-Required Recovery remains exclusive to `action_intent_without_tool_call`. If that Recovery does not produce a Tool Call, every failure shape is fused with `retryable=false` and the originating reason remains `action_intent_without_tool_call`. The Proxy performs no third Attempt and does not delegate the same semantic retry to Claude Code.
 
 ## Claude Code file-tool recovery

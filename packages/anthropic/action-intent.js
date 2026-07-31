@@ -174,35 +174,45 @@ function recoveryInstruction(issue) {
 
 function outputRecoveryInstruction(issue) {
   const placeholderCompletion = issue.reason === 'placeholder_completion_without_progress';
+  const schemaInvalidToolInput = issue.reason === 'invalid_tool_input_schema';
   const targetlessToolInput = issue.reason === 'invalid_claude_code_tool_input'
     && issue.diagnostics?.targetlessToolRecovery === true
     && !issue.context?.targetPath;
-  const previousFailure = targetlessToolInput
-    ? 'The previous tool call had incomplete or invalid input and was discarded.'
-    : (placeholderCompletion
-      ? 'The previous response contained only a placeholder after the latest accepted Tool Result.'
-      : 'The previous response ended after reasoning without visible output or a tool call.');
+
+  let previousFailure = 'The previous response ended after reasoning without visible output or a tool call.';
+  if (schemaInvalidToolInput) {
+    previousFailure = 'The previous tool call was rejected because required input fields were missing or its input did not match the supplied tool schema.';
+  } else if (targetlessToolInput) {
+    previousFailure = 'The previous tool call had incomplete or invalid input and was discarded.';
+  } else if (placeholderCompletion) {
+    previousFailure = 'The previous response contained only a placeholder after the latest accepted Tool Result.';
+  }
+
+  const recoveryConstraint = schemaInvalidToolInput
+    ? 'Do not invent missing identifiers or arguments. Use an appropriate read or list tool first when current state is required. Do not repeat the rejected tool input unchanged.'
+    : (targetlessToolInput
+      ? 'Do not assume the rejected tool must be used. Do not repeat an empty or incomplete tool call.'
+      : (placeholderCompletion
+        ? 'Do not answer with “No response”, “No output”, “無回應”, “沒有回應”, “無輸出”, “沒有輸出”, or another placeholder.'
+        : 'Do not end the turn with reasoning only.'));
+
   return [
     'Recovery is expected and the original task remains solvable.',
     previousFailure,
     'The previous generation was discarded and did not change task or tool state.',
     'Continue from the original request and accepted prior tool results only.',
     'Do not explain the recovery or repeat hidden reasoning.',
-    targetlessToolInput
+    (targetlessToolInput || schemaInvalidToolInput)
       ? 'Produce one substantive user-visible response, one complete valid tool call if external action is required, or one genuinely blocking question.'
       : 'Produce one valid user-visible response now.',
     'Use a supplied tool only when the task actually requires external action; otherwise answer, explain, plan, report completion, wait for confirmation, or ask one genuinely blocking question.',
-    ...(targetlessToolInput
-      ? ['Do not assume the rejected tool must be used. Do not repeat an empty or incomplete tool call.']
-      : (placeholderCompletion
-        ? ['Do not answer with “No response”, “No output”, “無回應”, “沒有回應”, “無輸出”, “沒有輸出”, or another placeholder.']
-        : ['Do not end the turn with reasoning only.'])),
+    recoveryConstraint,
     `Recovery reason: ${issue.reason}.`,
   ].join(' ');
 }
 
 export function buildAnthropicOutputRequiredRecovery({ original, prepared = null, issue, config }) {
-  const supportedReasons = ['thinking_without_output', 'placeholder_completion_without_progress', 'invalid_claude_code_tool_input'];
+  const supportedReasons = ['thinking_without_output', 'placeholder_completion_without_progress', 'invalid_claude_code_tool_input', 'invalid_tool_input_schema'];
   const targetlessToolInput = issue?.reason === 'invalid_claude_code_tool_input'
     && issue?.diagnostics?.targetlessToolRecovery === true
     && issue?.context
@@ -222,7 +232,10 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
     candidateNames: [...toolContext.requestToolNames],
     rejectPlaceholderCompletion: issue.reason === 'placeholder_completion_without_progress',
     targetlessToolRecovery: targetlessToolInput,
-    ...(targetlessToolInput ? { rejectedToolName: issue.context.toolName || null } : {}),
+    toolInputSchemaRecovery: issue.reason === 'invalid_tool_input_schema',
+    ...(['invalid_claude_code_tool_input', 'invalid_tool_input_schema'].includes(issue.reason)
+      ? { rejectedToolName: issue.context?.toolName || issue.diagnostics?.rejectedToolName || null }
+      : {}),
   };
   return {
     body,
@@ -237,7 +250,8 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
       forcedToolChoice: false,
       parallelToolCallsDisabled: toolContext.parallelToolCallsDisabled,
       targetlessToolRecovery: plan.targetlessToolRecovery,
-      ...(plan.targetlessToolRecovery ? { rejectedToolName: plan.rejectedToolName } : {}),
+      toolInputSchemaRecovery: plan.toolInputSchemaRecovery,
+      ...((plan.targetlessToolRecovery || plan.toolInputSchemaRecovery) ? { rejectedToolName: plan.rejectedToolName } : {}),
     },
   };
 }

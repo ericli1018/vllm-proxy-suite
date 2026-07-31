@@ -77,34 +77,121 @@ function schemaTypeMatches(value, type) {
   return true;
 }
 
+function sameJsonValue(left, right) {
+  return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+}
+
+function schemaFailure(detail, {
+  inputPath = '$',
+  schemaPath = '$',
+  keyword = null,
+} = {}) {
+  return {
+    ok: false,
+    reason: 'invalid_claude_code_tool_input',
+    detail,
+    diagnostics: {
+      schemaInputPath: inputPath,
+      schemaPath,
+      schemaKeyword: keyword,
+    },
+  };
+}
+
+function validateSchemaValue(schema, value, {
+  inputPath = '$',
+  schemaPath = '$',
+  depth = 0,
+} = {}) {
+  if (depth > 64) return schemaFailure('tool schema nesting exceeds the validation limit', { inputPath, schemaPath, keyword: 'depth' });
+  if (schema === true || schema === undefined || schema === null) return { ok: true };
+  if (schema === false) return schemaFailure(`value at ${inputPath} is rejected by the tool schema`, { inputPath, schemaPath, keyword: 'falseSchema' });
+  if (!isPlainObject(schema)) return { ok: true };
+  if (typeof schema.$ref === 'string') return { ok: true };
+
+  if (schema.type !== undefined && !schemaTypeMatches(value, schema.type)) {
+    return schemaFailure(`value at ${inputPath} does not match the required type`, { inputPath, schemaPath: `${schemaPath}.type`, keyword: 'type' });
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => sameJsonValue(candidate, value))) {
+    return schemaFailure(`value at ${inputPath} is outside the allowed enum`, { inputPath, schemaPath: `${schemaPath}.enum`, keyword: 'enum' });
+  }
+  if (Object.hasOwn(schema, 'const') && !sameJsonValue(schema.const, value)) {
+    return schemaFailure(`value at ${inputPath} does not match const`, { inputPath, schemaPath: `${schemaPath}.const`, keyword: 'const' });
+  }
+
+  if (isPlainObject(value)) {
+    const properties = isPlainObject(schema.properties) ? schema.properties : {};
+    const patternProperties = isPlainObject(schema.patternProperties) ? schema.patternProperties : {};
+    for (const key of Array.isArray(schema.required) ? schema.required : []) {
+      if (!(key in value)) {
+        return schemaFailure(`missing required field: ${key}`, { inputPath, schemaPath: `${schemaPath}.required`, keyword: 'required' });
+      }
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (Object.hasOwn(properties, key)) {
+        const result = validateSchemaValue(properties[key], child, {
+          inputPath: `${inputPath}.${key}`,
+          schemaPath: `${schemaPath}.properties.${key}`,
+          depth: depth + 1,
+        });
+        if (!result.ok) return result;
+        continue;
+      }
+
+      let patternMatched = false;
+      for (const [pattern, childSchema] of Object.entries(patternProperties)) {
+        let regexp;
+        try { regexp = new RegExp(pattern, 'u'); } catch { continue; }
+        if (!regexp.test(key)) continue;
+        patternMatched = true;
+        const result = validateSchemaValue(childSchema, child, {
+          inputPath: `${inputPath}.${key}`,
+          schemaPath: `${schemaPath}.patternProperties.${pattern}`,
+          depth: depth + 1,
+        });
+        if (!result.ok) return result;
+      }
+      if (patternMatched) continue;
+
+      if (schema.additionalProperties === false) {
+        return schemaFailure(`field ${key} is not allowed by the tool schema`, {
+          inputPath: `${inputPath}.${key}`,
+          schemaPath: `${schemaPath}.additionalProperties`,
+          keyword: 'additionalProperties',
+        });
+      }
+      if (isPlainObject(schema.additionalProperties)) {
+        const result = validateSchemaValue(schema.additionalProperties, child, {
+          inputPath: `${inputPath}.${key}`,
+          schemaPath: `${schemaPath}.additionalProperties`,
+          depth: depth + 1,
+        });
+        if (!result.ok) return result;
+      }
+    }
+  }
+
+  if (Array.isArray(value) && schema.items !== undefined) {
+    for (let index = 0; index < value.length; index += 1) {
+      const result = validateSchemaValue(schema.items, value[index], {
+        inputPath: `${inputPath}[${index}]`,
+        schemaPath: `${schemaPath}.items`,
+        depth: depth + 1,
+      });
+      if (!result.ok) return result;
+    }
+  }
+
+  return { ok: true };
+}
+
 function validateAgainstToolSchema(tool, input) {
   if (!tool) return invalid('tool_not_exposed');
-  if (!isPlainObject(input)) return invalid('invalid_claude_code_tool_input');
+  if (!isPlainObject(input)) {
+    return schemaFailure('tool input must be a JSON object', { inputPath: '$', schemaPath: '$', keyword: 'type' });
+  }
   const schema = isPlainObject(tool.input_schema) ? tool.input_schema : {};
-  for (const key of Array.isArray(schema.required) ? schema.required : []) {
-    if (!(key in input)) return invalid('invalid_claude_code_tool_input', `missing required field: ${key}`);
-  }
-  const properties = isPlainObject(schema.properties) ? schema.properties : {};
-  for (const [key, value] of Object.entries(input)) {
-    const property = properties[key];
-    if (!property || property.type === undefined) continue;
-    if (!schemaTypeMatches(value, property.type)) {
-      return invalid('invalid_claude_code_tool_input', `field ${key} does not match schema`);
-    }
-    if (
-      Array.isArray(property.enum)
-      && !property.enum.some((candidate) => JSON.stringify(canonicalize(candidate)) === JSON.stringify(canonicalize(value)))
-    ) {
-      return invalid('invalid_claude_code_tool_input', `field ${key} is outside the allowed enum`);
-    }
-    if (
-      Object.hasOwn(property, 'const')
-      && JSON.stringify(canonicalize(property.const)) !== JSON.stringify(canonicalize(value))
-    ) {
-      return invalid('invalid_claude_code_tool_input', `field ${key} does not match const`);
-    }
-  }
-  return { ok: true };
+  return validateSchemaValue(schema, input);
 }
 
 export function validateExposedClaudeCodeToolCalls({ request, output }) {
@@ -116,9 +203,15 @@ export function validateExposedClaudeCodeToolCalls({ request, output }) {
     if (!validation.ok) {
       return {
         ...validation,
+        reason: 'invalid_tool_input_schema',
         context: {
           toolName: call?.name || null,
           toolCallId: call?.id || null,
+        },
+        diagnostics: {
+          ...(validation.diagnostics || {}),
+          rejectedToolName: call?.name || null,
+          rejectedToolCallId: call?.id || null,
         },
       };
     }

@@ -636,6 +636,28 @@ forcedToolChoice=false
 
 A second targetless invalid mutation logs `targetless_tool_recovery_fused` with `retryable=false`.
 
+When any exposed Tool input fails its runtime `input_schema` before replay:
+
+```text
+tool_input_schema_recovery_started
+rejectedToolName="TaskUpdate"
+schemaInputPath="$"
+schemaPath="$.required"
+schemaKeyword="required"
+retryable=true
+```
+
+The Recovery request reports:
+
+```text
+recoveryMode="output_required"
+recoveryOriginReason="invalid_tool_input_schema"
+recoveryToolChoice="auto"
+toolInputSchemaRecovery=true
+```
+
+A second schema-invalid Tool Call logs `tool_input_schema_recovery_fused` with `retryable=false`.
+
 A schema-valid Tool Call that arrives with an incorrect `end_turn` terminal logs:
 
 ```text
@@ -662,6 +684,8 @@ vllm_cc_proxy_placeholder_completions_detected_total
 vllm_cc_proxy_placeholder_recoveries_fused_total
 vllm_cc_proxy_targetless_tool_recoveries_detected_total
 vllm_cc_proxy_targetless_tool_recoveries_fused_total
+vllm_cc_proxy_tool_input_schema_recoveries_detected_total
+vllm_cc_proxy_tool_input_schema_recoveries_fused_total
 vllm_cc_proxy_tool_stop_reason_normalizations_total
 ```
 

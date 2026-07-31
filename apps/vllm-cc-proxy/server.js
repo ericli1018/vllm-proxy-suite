@@ -50,6 +50,7 @@ export function loadAnthropicConfig(env = process.env) {
     claudeCodeToolRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_RECOVERY_ENABLED, true),
     claudeCodeActionIntentGuardEnabled: parseBoolean(env.CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED, true),
     claudeCodePlaceholderCompletionGuardEnabled: parseBoolean(env.CLAUDE_CODE_PLACEHOLDER_COMPLETION_GUARD_ENABLED, true),
+    claudeCodeToolInputSchemaGuardEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED, true),
     claudeCodeToolStopReasonNormalizationEnabled: parseBoolean(env.CLAUDE_CODE_TOOL_STOP_REASON_NORMALIZATION_ENABLED, true),
     claudeCodeEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_EDIT_RECOVERY_ENABLED, true),
     claudeCodeWriteRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_WRITE_RECOVERY_ENABLED, true),
@@ -148,6 +149,19 @@ export function createAnthropicGuardedRoute(config, options = {}) {
           };
         }
         return toolValidation;
+      }
+      if (config.claudeCodeToolInputSchemaGuardEnabled) {
+        const exposedToolValidation = validateExposedClaudeCodeToolCalls({ request: originalBody, output });
+        if (!exposedToolValidation.ok) {
+          return {
+            ...exposedToolValidation,
+            retryable: !recovery,
+            diagnostics: {
+              ...(exposedToolValidation.diagnostics || {}),
+              toolInputSchemaRecoveryAttempted: Boolean(recovery),
+            },
+          };
+        }
       }
       const completion = anthropicMessagesAdapter.completionDiagnostics(attempt.result);
       let normalization = null;
@@ -259,6 +273,7 @@ export function createAnthropicGuardedRoute(config, options = {}) {
       }
       if (
         ['thinking_without_output', 'placeholder_completion_without_progress'].includes(reason?.reason)
+        || (config.claudeCodeToolInputSchemaGuardEnabled && reason?.reason === 'invalid_tool_input_schema')
         || (config.claudeCodeToolRecoveryEnabled && isTargetlessClaudeCodeToolRecoveryIssue(reason))
       ) {
         return buildAnthropicOutputRequiredRecovery({

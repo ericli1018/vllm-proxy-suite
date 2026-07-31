@@ -51,6 +51,8 @@ function createMetrics() {
     placeholderRecoveriesFusedTotal: 0,
     targetlessToolRecoveriesDetectedTotal: 0,
     targetlessToolRecoveriesFusedTotal: 0,
+    toolInputSchemaRecoveriesDetectedTotal: 0,
+    toolInputSchemaRecoveriesFusedTotal: 0,
     toolStopReasonNormalizationsTotal: 0,
     hostedToolsFilteredTotal: 0,
     requiredHostedToolsRejectedTotal: 0,
@@ -483,7 +485,8 @@ export function createProtocolProxyRuntime({
       const recordActionlessCompletion = (validation, attemptNumber, recovery) => {
         const targetlessToolRecovery = validation?.reason === 'invalid_claude_code_tool_input'
           && validation?.diagnostics?.targetlessToolRecovery === true;
-        if (!targetlessToolRecovery && !['actionless_completion', 'action_intent_without_tool_call', 'thinking_without_output', 'placeholder_completion_without_progress'].includes(validation?.reason)) return;
+        const toolInputSchemaRecovery = validation?.reason === 'invalid_tool_input_schema';
+        if (!targetlessToolRecovery && !toolInputSchemaRecovery && !['actionless_completion', 'action_intent_without_tool_call', 'thinking_without_output', 'placeholder_completion_without_progress'].includes(validation?.reason)) return;
         const anthropicActionIntent = validation.reason === 'action_intent_without_tool_call';
         const thinkingWithoutOutput = validation.reason === 'thinking_without_output';
         const placeholderCompletion = validation.reason === 'placeholder_completion_without_progress';
@@ -491,6 +494,9 @@ export function createProtocolProxyRuntime({
         if (targetlessToolRecovery) {
           metrics.targetlessToolRecoveriesDetectedTotal += 1;
           if (recovery) metrics.targetlessToolRecoveriesFusedTotal += 1;
+        } else if (toolInputSchemaRecovery) {
+          metrics.toolInputSchemaRecoveriesDetectedTotal += 1;
+          if (recovery) metrics.toolInputSchemaRecoveriesFusedTotal += 1;
         } else if (thinkingWithoutOutput) {
           metrics.thinkingWithoutOutputRecoveriesFusedTotal += 1;
         } else if (placeholderCompletion) {
@@ -503,15 +509,18 @@ export function createProtocolProxyRuntime({
           metrics.actionlessCompletionsDetectedTotal += 1;
           if (recovery) metrics.actionlessRecoveriesFusedTotal += 1;
         }
-        const event = targetlessToolRecovery
-          ? (recovery ? 'targetless_tool_recovery_fused' : 'targetless_tool_recovery_started')
-          : (thinkingWithoutOutput
-            ? 'thinking_without_output_fused'
-            : (placeholderCompletion
-            ? (recovery ? 'placeholder_completion_without_progress_fused' : 'placeholder_completion_without_progress_detected')
-            : (anthropicActionIntent
-              ? (recovery ? 'action_intent_without_tool_call_fused' : 'action_intent_without_tool_call_detected')
-              : (recovery ? 'actionless_completion_fused' : 'actionless_completion_detected'))));
+        let event = recovery ? 'actionless_completion_fused' : 'actionless_completion_detected';
+        if (targetlessToolRecovery) {
+          event = recovery ? 'targetless_tool_recovery_fused' : 'targetless_tool_recovery_started';
+        } else if (toolInputSchemaRecovery) {
+          event = recovery ? 'tool_input_schema_recovery_fused' : 'tool_input_schema_recovery_started';
+        } else if (thinkingWithoutOutput) {
+          event = 'thinking_without_output_fused';
+        } else if (placeholderCompletion) {
+          event = recovery ? 'placeholder_completion_without_progress_fused' : 'placeholder_completion_without_progress_detected';
+        } else if (anthropicActionIntent) {
+          event = recovery ? 'action_intent_without_tool_call_fused' : 'action_intent_without_tool_call_detected';
+        }
         requestLogger.warn(event, {
           attempt: attemptNumber,
           phase: recovery ? 'recovery' : 'initial',

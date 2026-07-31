@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.9 - 2026-07-31
+
+- Added a universal Anthropic Tool Input Schema Guard that validates every buffered Tool Call before replay, including task-management, MCP, and dynamically supplied Tools rather than only file mutation Tools.
+- Added recursive validation for required fields, primitive and container types, enums, constants, nested object properties, array items, `additionalProperties:false`.
+- Schema-invalid calls such as `TaskUpdate({"status":"completed"})` without the required `taskId` are discarded as `invalid_tool_input_schema` before Claude Code can execute them.
+- Added one generic Output-Required Recovery that preserves the complete Tool set and original `tool_choice`; `auto` remains `auto`, missing identifiers are never invented, and the model may inspect current state with a list/read Tool before retrying.
+- A second schema-invalid Tool Call is fused with `retryable:false`, preventing client API retry cascades.
+- Added `CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED`, dedicated lifecycle events and Prometheus counters, focused recursive and integration regressions, deployment validation, and documentation.
+
 ## 0.7.8 - 2026-07-31
 
 - Added guarded Anthropic Tool stop-reason normalization for complete, schema-valid Tool Calls that incorrectly terminate with `stop_reason="end_turn"`.

@@ -146,6 +146,24 @@ invalid mutation + no exact target
 → repeated invalid targetless mutation: fused
 ```
 
+## Universal Tool Input Schema Guard
+
+Every buffered Anthropic Tool Call is validated against the matching runtime `tools[].input_schema` before replay. This guard applies to all exposed Tools, including task-management and MCP Tools, not only Claude Code file mutation Tools.
+
+The validator recursively enforces required fields, declared types, enum and const values, nested object properties, array items, and `additionalProperties:false`. Unknown schema keywords are ignored rather than guessed. `$ref` and composite schemas are not expanded or guessed by the Proxy.
+
+```text
+TaskUpdate({"status":"completed"})
++ input_schema.required=["taskId"]
+→ invalid_tool_input_schema
+→ discard initial Attempt
+→ one Output-Required Recovery with original tool_choice
+```
+
+The Recovery instruction explicitly forbids inventing missing identifiers and permits a state-read Tool such as `TaskList`, another complete Tool Call, substantive text, or one blocking question. It does not force the rejected Tool. A repeated schema-invalid Tool Call is fused with `retryable=false`.
+
+`CLAUDE_CODE_TOOL_INPUT_SCHEMA_GUARD_ENABLED=false` disables this universal pre-replay guard. Existing exact-target mutation Recovery remains independently controlled by `CLAUDE_CODE_TOOL_RECOVERY_ENABLED`.
+
 ## Claude Code Tool stop-reason normalization
 
 A Tool block and its terminal stop reason are validated as one protocol transition. When a buffered Anthropic response contains at least one complete Tool Call but terminates with `stop_reason="end_turn"`, normalization is allowed only when all of the following hold:

@@ -163,7 +163,7 @@ test('Initial validated Tool Call also normalizes end_turn to tool_use', async (
     && row.phase === 'initial'));
 });
 
-test('invalid Tool input is not normalized merely because a Tool block exists', async () => {
+test('invalid Tool input is rejected by the universal schema guard before stop-reason normalization', async () => {
   const result = await invokeProxy({
     upstreamHandler: async (req, res) => {
       for await (const _chunk of req) { /* drain */ }
@@ -178,7 +178,7 @@ test('invalid Tool input is not normalized merely because a Tool block exists', 
   });
 
   assert.equal(result.response.status, 502);
-  assert.match(result.text, /tool_stop_reason_mismatch/);
+  assert.match(result.text, /invalid_tool_input_schema/);
   assert.ok(!result.logs.some((row) => row.event === 'tool_stop_reason_normalized'));
 });
 

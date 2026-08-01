@@ -142,18 +142,21 @@ There is no automatic native-to-chat fallback after an attempt starts. A deploym
 
 ## Managed WebSearch execution layer
 
-The Anthropic runtime can optionally wrap its vLLM fetch path with `packages/anthropic/managed-websearch.js`.
+The Anthropic runtime can optionally wrap its vLLM fetch path with `packages/anthropic/managed-web-tools.js`. `packages/anthropic/hosted-web-tools.js` adapts Claude Code child requests that use Anthropic Hosted Web Search syntax.
 
 ```text
 Claude Code /v1/messages
-→ vLLM Anthropic Messages generation
-→ exactly one WebSearch tool_use
+→ optional web_search_20250305 request normalization
+→ vLLM Anthropic Messages generation with custom WebSearch/web_search schema
+→ homogeneous managed search tool_use batch
 → SearXNG JSON Search API
 → bounded untrusted tool_result
 → internal Anthropic continuation
 → final text or ordinary Claude Code tool_use
 ```
 
-The bridge does not change the shared protocol runtime. Anthropic responses are already buffered before replay, so the bridge can hide the managed Tool Call without crossing an irreversible client-delivery boundary. Responses containing mixed tools, multiple Tool Calls, malformed tool input, unknown content blocks, or a non-`tool_use` stop reason are returned untouched.
+Hosted-only fields are consumed before the first vLLM request. The request-local adapter preserves `max_uses` and domain policies for the Managed WebSearch executor while removing `type="web_search_20250305"` and other fields that vLLM would reject. It does not fabricate Anthropic `server_tool_use`, native `web_search_tool_result`, encrypted content, or citation blocks; the Hosted Tool request is completed through the existing internal custom-Tool loop.
 
-The continuation preserves supported thinking, text, and tool-use blocks and appends a matching `tool_result`. It does not emulate Anthropic Hosted Web Search, server tool lifecycle events, encrypted content, citations, or WebFetch.
+The bridge does not change the shared protocol runtime. Anthropic responses are already buffered before replay, so the bridge can hide the managed Tool Call without crossing an irreversible client-delivery boundary. Responses containing mixed Managed/Client tools, malformed tool input, unknown content blocks, or a non-`tool_use` stop reason are returned untouched.
+
+Search and Fetch limits are request-local and per kind. Reaching one limit removes only that tool kind. A repeated call to a kind already removed for limit exhaustion is fused locally with HTTP 422 and no additional model generation.

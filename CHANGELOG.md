@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.12 - 2026-08-01
+
+- Added an Anthropic Hosted Web Search compatibility adapter for Claude Code child requests that carry `type="web_search_20250305"`, `name="web_search"`, and no `input_schema`.
+- Hosted Web Search requests are converted before vLLM validation into a Proxy-managed custom Tool with a bounded `query` schema; hosted-only fields are retained as request-local policy and are never sent upstream.
+- Request `max_uses` is enforced together with `SEARXNG_MAX_USES` by taking the smaller positive limit. Hosted allowed/blocked domain policies are applied as defaults to managed search calls.
+- Replaced the global Managed Web limit-continuation flag with per-kind Search/Fetch disabling, so exhausting WebFetch no longer disables a later WebSearch and exhausting WebSearch no longer disables a later WebFetch.
+- Added a bounded post-limit fuse: if the model calls a Managed Tool after that kind was removed for reaching its limit, the Proxy preserves `managed_web_tool_limit_repeated` with `retryable:false`, emits HTTP `422` before headers are committed or an equivalent SSE error after managed progress has begun, and does not issue another model request or expose the Tool Call to Claude Code.
+- Added local rejection for Hosted Web Search when the bridge is disabled, the `anthropic_hosted_web_search_adapted` lifecycle event, focused no-loop regressions, package validation, and documentation.
+
+## 0.7.11 - 2026-08-01
+
+- Extended the conservative Anthropic Action-Intent classifier to immediate test and verification narrations, including `讓我測試 server`, `讓我驗證 TLS handshake`, `Let me test`, and `Let me verify`, while preserving completed reports, phase plans, and confirmation boundaries.
+- Kept the existing hard Recovery bound: one initial Attempt plus at most one `action_required` Recovery; there is no third upstream generation.
+- A successful Recovery must contain a valid Tool Call. A second narration-only or thinking-only result is fused as `action_intent_without_tool_call` with `retryable:false`.
+- Changed only the exhausted Action-Intent fuse response from HTTP 502 to HTTP 422 and added `client_retry_suppressed`, preventing Claude Code from turning a deliberately bounded semantic fuse into a 10-attempt 5xx client retry chain.
+- Added exact live-phrase regressions, false-positive boundaries, successful one-shot Tool recovery, repeated-narration fusion, package validation, and documentation.
+
 ## 0.7.10 - 2026-07-31
 
 - Added Targeted Tool Input Schema Correction for a single `additionalProperties:false` violation when removing that one unsupported property makes the original Tool input fully schema-valid.

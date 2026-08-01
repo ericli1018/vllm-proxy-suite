@@ -193,6 +193,24 @@ Proxy 不改寫 `model`，名稱必須與 vLLM `--served-model-name` 一致。
 
 v0.7.3 提供 opt-in Managed Web Tools Layer。單一受管理工具與**同類型平行批次**都由 Proxy 攔截；`WebSearch + WebSearch` 或 `WebFetch + WebFetch` 進入有界內部隊列，混合 Managed/Client Tools 仍整份原樣交回 Claude Code。
 
+v0.7.12 另外處理 Claude Code 產生的 Anthropic Hosted Web Search 子請求。當 request 只帶有：
+
+```json
+{
+  "type": "web_search_20250305",
+  "name": "web_search",
+  "max_uses": 8
+}
+```
+
+Proxy 會在送往 vLLM 前改寫為帶 `input_schema` 的 `web_search` Custom Tool，並由同一個 Managed WebSearch Layer 執行。Hosted-only `type`、`max_uses` 與 domain policy 只存在於 request-local policy，不會送入 vLLM。實際搜尋次數採 `min(max_uses, SEARXNG_MAX_USES)`；Bridge 關閉時，Proxy 會在本地回傳 `anthropic_hosted_web_search_unavailable`、`retryable:false`，不再讓 vLLM 以缺少 `input_schema` 的 400 拒絕。
+
+成功改寫會記錄：
+
+```text
+event=anthropic_hosted_web_search_adapted
+```
+
 ```text
 WebSearch
 → SearXNG JSON Search API
@@ -236,7 +254,7 @@ assistant: WebSearch A + WebSearch B + WebSearch C
 → 全部 tool_use_id 都有結果後，以單一 user tool_result turn 做 continuation
 ```
 
-`WebFetch` 使用相同排程，但每一項可能包含下載、Chunk Reader 與 Synthesizer，因此由 `WEBFETCH_MAX_PARALLEL` 獨立限制。Proxy 不會把內部 `tool_result` 暴露給 Claude Code，也不會顯示成 `Search(...)` 工具列。只有確定進入 Managed WebSearch／WebFetch 後才建立 synthetic `message_start`；普通 Bash、Read、Write 或純文字回應維持原始 Anthropic stream，不會多出空白 `●`。WebSearch 預設顯示清理後的 query；WebFetch 只顯示 hostname，不顯示 URL path、query string、token、Cookie、snippet 或正文。週期性可見 `text_delta` 會持續追加省略號，最後將 vLLM SSE content block index 平移並 splice 到同一 lifecycle。Progress block 以不可見 sentinel 標記，下一輪送往 vLLM 前會整塊移除，避免污染模型歷史與 prefix cache。Anthropic Tool ID 配對仍要求同一 assistant turn 的所有結果齊備後才能安全 continuation。因 synthetic `message_start` 必須在取得 upstream usage 前送出，Claude Code 端的 `usage.input_tokens` 會是 `0`；Proxy Log 仍保留 vLLM 最終回報的實際 token usage。
+`WebFetch` 使用相同排程，但每一項可能包含下載、Chunk Reader 與 Synthesizer，因此由 `WEBFETCH_MAX_PARALLEL` 獨立限制。Search 與 Fetch 的使用上限分別追蹤：WebFetch 達上限只移除 Fetch，後續 WebSearch 仍可繼續；WebSearch 達上限只移除 Search，後續 WebFetch 仍可繼續。若模型在某一種類已達上限並從 `tools[]` 移除後仍再次呼叫同一種類，Proxy 立即以 `managed_web_tool_limit_repeated`、`retryable:false` 熔斷；尚未送出回應標頭時使用 HTTP `422`，若 Managed SSE progress 已開始則在既有 stream 送出同型別 `event:error`。兩種路徑都會記錄 `client_retry_suppressed`，不再產生額外模型請求，也不把該 Tool Call 洩漏給 Claude Code。Proxy 不會把內部 `tool_result` 暴露給 Claude Code，也不會顯示成 `Search(...)` 工具列。只有確定進入 Managed WebSearch／WebFetch 後才建立 synthetic `message_start`；普通 Bash、Read、Write 或純文字回應維持原始 Anthropic stream，不會多出空白 `●`。WebSearch 預設顯示清理後的 query；WebFetch 只顯示 hostname，不顯示 URL path、query string、token、Cookie、snippet 或正文。週期性可見 `text_delta` 會持續追加省略號，最後將 vLLM SSE content block index 平移並 splice 到同一 lifecycle。Progress block 以不可見 sentinel 標記，下一輪送往 vLLM 前會整塊移除，避免污染模型歷史與 prefix cache。Anthropic Tool ID 配對仍要求同一 assistant turn 的所有結果齊備後才能安全 continuation。因 synthetic `message_start` 必須在取得 upstream usage 前送出，Claude Code 端的 `usage.input_tokens` 會是 `0`；Proxy Log 仍保留 vLLM 最終回報的實際 token usage。
 
 啟用內建 SearXNG 與兩個 Bridge：
 
@@ -628,6 +646,8 @@ tool_choice 不是 none
 我繼續執行，先檢查目前狀態。
 I am starting the implementation now.
 Let me inspect the workspace first.
+憑證已存在。讓我測試 server。
+Let me test the TLS server now.
 ```
 
 初次命中時，Proxy 丟棄整份 narration Attempt，只使用既有單一 Recovery slot：
@@ -644,7 +664,10 @@ tool_choice={type:"any",disable_parallel_tool_use:true}
 ```text
 reason="action_intent_without_tool_call"
 retryable=false
+HTTP status=422
 ```
+
+Action-Required Recovery 最多只執行一次。第二次仍未產生有效 Tool Call 時，Proxy 不會進行第三次上游請求，並以 HTTP `422` 回傳 `retryable=false`；此非 5xx 狀態用來避免 Claude Code 將已熔斷的語意失敗再展開成 `attempt 1/10` 客戶端重試。日誌同時記錄 `client_retry_suppressed`。
 
 `thinking_without_output` 使用另一條 **Output-Required Recovery**，不代表本回合一定需要工具：
 
@@ -796,7 +819,7 @@ targetless_tool_recovery_fused
 | 變數 | 預設 |
 |---|---:|
 | `CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED` | `false` |
-| `CLAUDE_CODE_WEBSEARCH_TOOL_NAMES` | `WebSearch` |
+| `CLAUDE_CODE_WEBSEARCH_TOOL_NAMES` | `WebSearch`；Hosted `web_search_20250305` 會自動加入 request-local `web_search` alias，不需修改此變數 |
 | `SEARXNG_VERSION` | `latest`；只供 Compose `websearch` profile 的內建 service 使用 |
 | `SEARXNG_SECRET` | 空；內建 service 首次建立設定時自動產生並持久化，正式環境可自行指定 |
 | `SEARXNG_BASE_URL` | Runtime 預設空；Compose 內建 service 使用 `http://searxng:8080` |

@@ -113,7 +113,7 @@ A separate `placeholder_completion_without_progress` classifier applies only whe
 
 The placeholder Attempt is discarded and uses the same Output-Required Recovery path with the original Tool choice preserved. The Recovery instruction explicitly rejects another placeholder but still permits substantive text, a Tool Call, or one blocking question. A repeated placeholder is fused as `placeholder_completion_without_progress` with `retryable=false`.
 
-Action-Required Recovery remains exclusive to `action_intent_without_tool_call`. If that Recovery does not produce a Tool Call, every failure shape is fused with `retryable=false` and the originating reason remains `action_intent_without_tool_call`. The Proxy performs no third Attempt and does not delegate the same semantic retry to Claude Code.
+Action-Required Recovery remains exclusive to `action_intent_without_tool_call`. Immediate test and verification narrations such as `讓我測試 server`, `讓我驗證 TLS handshake`, `Let me test the TLS server`, and `Let me verify the handshake` are included; completed-status reports and future plans remain excluded. If that Recovery does not produce a Tool Call, every failure shape is fused with `retryable=false` and the originating reason remains `action_intent_without_tool_call`. The Proxy performs no third Attempt. The fused response uses HTTP `422` rather than a retryable 5xx status and emits `client_retry_suppressed`, preventing Claude Code from expanding the bounded internal Recovery into an external `attempt 1/10` retry chain.
 
 ## Claude Code file-tool recovery
 

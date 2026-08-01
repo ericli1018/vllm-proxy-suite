@@ -1071,7 +1071,20 @@ export function createProtocolProxyRuntime({
         reason: attempt.reason || attempt.loopInfo?.reason || 'unknown',
         ...failureFields,
       }, 'error');
-      const status = attempt.kind === 'http_error' && attempt.status < 500 ? attempt.status : 502;
+      const failureReason = attempt.reason || attempt.loopInfo?.reason || 'unknown';
+      const clientRetrySuppressed = attempt.kind === 'invalid'
+        && attempt.retryable === false
+        && ['action_intent_without_tool_call', 'managed_web_tool_limit_repeated'].includes(failureReason);
+      const status = attempt.kind === 'http_error' && attempt.status < 500
+        ? attempt.status
+        : (clientRetrySuppressed ? 422 : 502);
+      if (clientRetrySuppressed) {
+        requestLogger.warn('client_retry_suppressed', {
+          reason: failureReason,
+          status,
+          retryable: false,
+        });
+      }
       await closeManagedStreamForError();
       return sendGuardedFailure({
         response,

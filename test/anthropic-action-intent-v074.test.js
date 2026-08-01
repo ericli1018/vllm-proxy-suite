@@ -169,6 +169,36 @@ test('Anthropic action-intent guard detects immediate narration with end_turn', 
   assert.equal(validation.diagnostics.actionIntentDetected, true);
 });
 
+test('Anthropic action-intent guard detects immediate server test narration without matching status reports or plans', () => {
+  for (const finalText of [
+    '憑證已存在。讓我測試 server。',
+    'Let me test the TLS server now.',
+    '讓我驗證 TLS handshake。',
+  ]) {
+    const validation = detectAnthropicActionIntentWithoutToolCall({
+      requestBody: baseRequest(),
+      output: output(finalText),
+      completion: completion('end_turn'),
+      recovery: false,
+    });
+    assert.equal(validation.ok, false, finalText);
+    assert.equal(validation.reason, 'action_intent_without_tool_call');
+    assert.equal(validation.retryable, true);
+  }
+
+  for (const finalText of [
+    'TLS server 測試已完成。',
+    '階段 2 的下一步是測試 server。',
+    '確認後再測試 server。',
+  ]) {
+    assert.deepEqual(detectAnthropicActionIntentWithoutToolCall({
+      requestBody: baseRequest(),
+      output: output(finalText),
+      completion: completion('end_turn'),
+    }), { ok: true }, finalText);
+  }
+});
+
 test('Anthropic action-intent guard ignores plans, final answers, tool responses, and disabled tools', () => {
   assert.deepEqual(detectAnthropicActionIntentWithoutToolCall({
     requestBody: baseRequest(),
@@ -274,6 +304,76 @@ test('Claude Code runtime discards narration and replays only the recovered Tool
   assert.equal(runtime.metrics.actionIntentRecoveriesFusedTotal, 0);
 });
 
+test('Claude Code server-test narration performs exactly one Recovery and suppresses client retry after a second narration-only result', async (t) => {
+  let attempts = 0;
+  const logs = [];
+  const upstream = http.createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain */ }
+    attempts += 1;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(attempts === 1
+      ? textSse('憑證已存在。讓我測試 server。')
+      : textSse('讓我驗證 TLS handshake。'));
+  });
+  const upstreamUrl = await listen(upstream);
+  const runtime = createAnthropicProxyRuntime({
+    config: configFor(upstreamUrl),
+    exposeControlRoutes: false,
+    logSink(line) { logs.push(JSON.parse(line)); },
+  });
+  const proxy = http.createServer(runtime.handle);
+  const proxyUrl = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+    body: JSON.stringify(baseRequest()),
+  });
+  const text = await response.text();
+
+  assert.equal(attempts, 2);
+  assert.equal(response.status, 422);
+  assert.match(text, /action_intent_without_tool_call/);
+  assert.match(text, /"retryable":false/);
+  assert.ok(logs.some((row) => row.event === 'action_intent_without_tool_call_detected'));
+  assert.ok(logs.some((row) => row.event === 'action_intent_without_tool_call_fused'));
+  assert.equal(runtime.metrics.recoveriesTotal, 1);
+  assert.equal(runtime.metrics.actionIntentRecoveriesFusedTotal, 1);
+});
+
+test('Claude Code server-test narration recovers once into a Tool Call', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain */ }
+    attempts += 1;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(attempts === 1
+      ? textSse('憑證已存在。讓我測試 server。')
+      : toolSse('Bash', { command: './tls-server --test' }));
+  });
+  const upstreamUrl = await listen(upstream);
+  const runtime = createAnthropicProxyRuntime({
+    config: configFor(upstreamUrl),
+    exposeControlRoutes: false,
+  });
+  const proxy = http.createServer(runtime.handle);
+  const proxyUrl = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+    body: JSON.stringify(baseRequest()),
+  });
+  const text = await response.text();
+
+  assert.equal(attempts, 2);
+  assert.equal(response.status, 200);
+  assert.match(text, /"name":"Bash"/);
+  assert.doesNotMatch(text, /讓我測試 server/);
+});
+
 test('Claude Code action-required Recovery converts thinking-only end_turn into non-retryable fused failure', async (t) => {
   let attempts = 0;
   const logs = [];
@@ -303,7 +403,7 @@ test('Claude Code action-required Recovery converts thinking-only end_turn into 
   const text = await response.text();
 
   assert.equal(attempts, 2);
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 422);
   assert.match(text, /action_intent_without_tool_call/);
   assert.match(text, /"retryable":false/);
   assert.ok(logs.some((row) => row.event === 'action_intent_without_tool_call_fused'

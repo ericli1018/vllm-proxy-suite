@@ -33,9 +33,10 @@ Think Loop detection remains heuristic before an action boundary. The default re
 ## Managed WebSearch limitations
 
 - The SearXNG bridge is disabled by default and requires an externally reachable SearXNG instance with JSON output enabled.
-- v0.7.3 manages one or more homogeneous WebSearch calls or one or more homogeneous WebFetch calls with bounded concurrency. Mixed Managed/Client Tool batches are still delivered unchanged to Claude Code.
-- WebSearch results remain snippets and links. Managed WebFetch can read bounded HTML/text/PDF content, but native Anthropic citations, encrypted server-tool state, and hosted-search usage accounting are not implemented.
+- v0.7.12 manages one or more homogeneous WebSearch calls or one or more homogeneous WebFetch calls with bounded concurrency. Mixed Managed/Client Tool batches are still delivered unchanged to Claude Code.
+- `web_search_20250305` requests are adapted to the Proxy-managed search loop, but native Anthropic server-tool lifecycle blocks, citations, encrypted state, and hosted-search usage accounting are not reproduced. WebSearch results remain bounded snippets and links.
 - Allowed and blocked domains are enforced by filtering returned result hostnames; they are not a transport-level guarantee that SearXNG queried only those domains.
+- Search and Fetch limits are independent. A model that calls a tool kind again after that kind was removed for limit exhaustion receives a local non-retryable 422 failure rather than another model continuation.
 - The bridge buffers each vLLM sub-response and performs an internal continuation, increasing latency and context usage. After the first Managed Tool starts, a synthetic Anthropic lifecycle sends periodic visible or invisible text deltas to keep Claude Code active, but the model continuation still waits for every Tool Result belonging to the same assistant turn.
 
 ## Managed WebFetch

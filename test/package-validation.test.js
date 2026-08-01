@@ -15,7 +15,7 @@ test('package validator confirms required deployable artifacts', () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.valid, true);
   assert.equal(report.project, 'VLLM-PROXY-SUITE');
-  assert.equal(report.version, '0.7.10');
+  assert.equal(report.version, '0.7.12');
   assert.equal(report.architecture, 'single-process-javascript-gateway');
   assert.equal(report.repository, 'https://github.com/ericli1018/vllm-proxy-suite.git');
   assert.ok(report.files >= 20);
@@ -55,12 +55,18 @@ test('README documents native path routing and separate protocol keys', () => {
   assert.match(readme, /placeholder_completion_without_progress/);
   assert.match(readme, /targetless_tool_recovery|Targetless Invalid Tool Recovery/i);
   assert.match(readme, /action_intent_without_tool_call/);
+  assert.match(readme, /讓我測試 server|Let me test the TLS server/);
+  assert.match(readme, /HTTP 422|422/);
+  assert.match(readme, /client_retry_suppressed/);
   assert.match(readme, /thinking_without_output/);
   assert.match(readme, /Output-Required Recovery|output_required/i);
   assert.match(readme, /auto.*仍為 auto|auto.*remains.*auto/is);
   assert.match(readme, /繼續.*proceed|proceed.*繼續/s);
   assert.match(readme, /CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED/);
   assert.match(readme, /SearXNG/i);
+  assert.match(readme, /web_search_20250305/);
+  assert.match(readme, /anthropic_hosted_web_search_adapted/);
+  assert.match(readme, /managed_web_tool_limit_repeated/);
   assert.match(readme, /單一 Node\.js Gateway Process|單一.*JavaScript Gateway/s);
   assert.match(readme, /github\.com\/ericli1018\/vllm-proxy-suite/);
   assert.doesNotMatch(readme, /Nginx Gateway/);

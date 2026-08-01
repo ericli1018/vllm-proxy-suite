@@ -28,6 +28,7 @@ const required = [
   'packages/anthropic/action-intent.js',
   'packages/anthropic/managed-websearch.js',
   'packages/anthropic/managed-web-tools.js',
+  'packages/anthropic/hosted-web-tools.js',
   'packages/anthropic/stream-envelope.js',
   'packages/anthropic/claude-code-tools/recovery.js',
   'packages/openai/chat-completions.js',
@@ -58,6 +59,7 @@ const required = [
   'test/anthropic-tool-stop-reason-normalization-v078.test.js',
   'test/anthropic-tool-input-schema-guard-v079.test.js',
   'test/anthropic-targeted-schema-correction-v0710.test.js',
+  'test/anthropic-hosted-web-search-v0712.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -82,7 +84,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.10') errors.push('package.json version must be 0.7.10');
+if (packageJson.version !== '0.7.12') errors.push('package.json version must be 0.7.12');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -169,6 +171,7 @@ const anthropicRuntime = readFileSync(resolve(root, 'apps/vllm-cc-proxy/server.j
 if (!anthropicRuntime.includes('createAnthropicManagedWebToolsFetch')) errors.push('Anthropic runtime must support managed WebSearch and WebFetch');
 if (!anthropicRuntime.includes('managed_websearch_completed')) errors.push('Anthropic runtime must observe managed WebSearch lifecycle');
 if (!anthropicRuntime.includes('managed_webfetch_completed')) errors.push('Anthropic runtime must observe managed WebFetch lifecycle');
+if (!anthropicRuntime.includes('anthropic_hosted_web_search_adapted')) errors.push('Anthropic runtime must observe hosted WebSearch adaptation');
 if (!anthropicRuntime.includes('managedStreamEnvelopeEnabled')) errors.push('Anthropic runtime must enable managed stream envelopes');
 if (!anthropicRuntime.includes('detectAnthropicActionIntentWithoutToolCall')) errors.push('Anthropic runtime must enable Action-Intent detection');
 if (!anthropicRuntime.includes('detectAnthropicPlaceholderCompletionWithoutProgress')) errors.push('Anthropic runtime must enable placeholder-completion detection');
@@ -178,6 +181,10 @@ if (!anthropicRuntime.includes('validateAnthropicOutputRequiredRecovery')) error
 if (!anthropicRuntime.includes('validateExposedClaudeCodeToolCalls')) errors.push('Anthropic runtime must validate every exposed Tool input before replay');
 if (!anthropicRuntime.includes('isTargetlessClaudeCodeToolRecoveryIssue')) errors.push('Anthropic runtime must route targetless invalid mutation Tool calls to generic Recovery');
 
+
+const hostedWebTools = readFileSync(resolve(root, 'packages/anthropic/hosted-web-tools.js'), 'utf8');
+if (!hostedWebTools.includes('web_search_20250305')) errors.push('Hosted Web Tool adapter must recognize Anthropic web_search_20250305');
+if (!hostedWebTools.includes('input_schema')) errors.push('Hosted Web Tool adapter must produce a custom Tool input schema');
 
 const managedStreamEnvelope = readFileSync(resolve(root, 'packages/anthropic/stream-envelope.js'), 'utf8');
 if (!managedStreamEnvelope.includes('message_start')) errors.push('Managed stream envelope must emit message_start');

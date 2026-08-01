@@ -8,6 +8,7 @@ import {
   spliceManagedAnthropicStream,
   stripManagedProgressBlocks,
 } from './stream-envelope.js';
+import { normalizeAnthropicHostedWebSearchTools } from './hosted-web-tools.js';
 
 const UNSUPPORTED_FIELDS = [
   'thinking_token_budget',
@@ -404,6 +405,7 @@ export function normalizeAnthropicToolStopReason(attempt, {
 export function applyAnthropicRequestPolicy(input, config) {
   const body = structuredClone(input);
   body.messages = stripManagedProgressBlocks(body.messages);
+  normalizeAnthropicHostedWebSearchTools(body, config);
   for (const field of UNSUPPORTED_FIELDS) delete body[field];
 
   if (!isNumber(body.temperature, 0, 1)) delete body.temperature;

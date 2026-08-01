@@ -566,6 +566,11 @@ phase="recovery"
 retryable=false
 recoveryFailureKind="invalid|loop|interrupted|http_error"
 recoveryFailureReason="thinking_without_output|..."
+
+client_retry_suppressed
+reason="action_intent_without_tool_call"
+status=422
+retryable=false
 ```
 
 For any initial Thinking-only terminal response, Output-Required Recovery logs include:
@@ -735,6 +740,29 @@ vllm_openai_proxy_required_hosted_tools_rejected_total
 vllm_openai_proxy_malformed_tool_retries_total
 vllm_openai_proxy_malformed_tool_retry_failures_total
 ```
+
+## Anthropic Hosted Web Search adaptation
+
+When a Claude Code child request contains `type="web_search_20250305"` and the Managed WebSearch bridge is enabled, request preparation emits:
+
+```text
+event=anthropic_hosted_web_search_adapted
+count=<adapted hosted tools>
+upstreamToolName="web_search"
+managed=true
+```
+
+The hosted-only configuration is consumed before the first vLLM request. Query text, domain lists, and result payloads are not logged by this event.
+
+If a Managed Search or Fetch kind has already reached its limit and the model calls that removed kind again, the route preserves the following non-retryable failure. It uses HTTP `422` when headers are not committed, or an equivalent SSE `event:error` when managed progress has already started:
+
+```text
+type=managed_web_tool_limit_repeated
+retryable=false
+kind="search" | "fetch"
+```
+
+This is a local no-loop fuse: no additional vLLM request is issued and no Tool Call is replayed to Claude Code. The runtime also emits `event=client_retry_suppressed` with `reason=managed_web_tool_limit_repeated`.
 
 ## Claude Code Managed WebSearch
 

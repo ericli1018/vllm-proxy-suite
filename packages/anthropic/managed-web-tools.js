@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { anthropicMessagesAdapter } from './messages.js';
+import { applyHostedWebSearchDefaults, consumeAnthropicHostedWebSearchPolicy } from './hosted-web-tools.js';
 
 const execFileAsync = promisify(execFile);
 const TRACKING_PARAMETERS = new Set(['fbclid', 'gclid', 'mc_cid', 'mc_eid', 'ref', 'ref_src']);
@@ -157,6 +158,26 @@ function responseFromRaw(upstream, rawBody, stats = null) {
   if (stats?.fetchLimitReached) headers.set('x-vllm-proxy-managed-webfetch-limit-reached', 'true');
   if (stats?.fetchChunks > 0) headers.set('x-vllm-proxy-managed-webfetch-chunks', String(stats.fetchChunks));
   return new Response(rawBody, { status: upstream.status, statusText: upstream.statusText, headers });
+}
+
+function managedLimitRepeatedResponse(kind, stats) {
+  const rawBody = Buffer.from(JSON.stringify({
+    type: 'error',
+    error: {
+      type: 'managed_web_tool_limit_repeated',
+      message: `The model called disabled managed ${kind} tooling after its bounded use limit was reached.`,
+      retryable: false,
+      kind,
+    },
+  }));
+  const upstream = new Response(rawBody, {
+    status: 422,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'x-vllm-proxy-managed-web-limit-repeated': kind,
+    },
+  });
+  return responseFromRaw(upstream, rawBody, stats);
 }
 
 function toolBlocks(result) {
@@ -343,8 +364,8 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs, parentSignal, t
   }
 }
 
-async function executeSearch(fetchImpl, call, config, parentSignal) {
-  const input = searchInput(call.input || {}, config);
+async function executeSearch(fetchImpl, call, config, parentSignal, hostedPolicy = null) {
+  const input = searchInput(applyHostedWebSearchDefaults(call.input || {}, hostedPolicy), config);
   const url = buildSearxngSearchUrl(input, config);
   const headers = new Headers({ accept: 'application/json' });
   if (config.searxngApiKey) headers.set('authorization', `Bearer ${config.searxngApiKey}`);
@@ -750,12 +771,21 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
     } catch {
       return fetchImpl(url, upstreamInit);
     }
+    const hosted = consumeAnthropicHostedWebSearchPolicy(requestBody);
+    requestBody = hosted.body;
+    const hostedSearchPolicy = hosted.policy;
+    const effectiveConfig = hostedSearchPolicy
+      ? {
+        ...config,
+        managedWebSearchToolNames: [...new Set([...(config.managedWebSearchToolNames || ['WebSearch']), 'web_search'])],
+      }
+      : config;
 
     const stats = {
       searchUses: 0, searchFailures: 0, searchLimitReached: false,
       fetchUses: 0, fetchFailures: 0, fetchLimitReached: false, fetchChunks: 0,
     };
-    let limitContinuation = false;
+    const disabledManagedKinds = new Set();
 
     while (true) {
       const upstream = await fetchImpl(url, { ...upstreamInit, body: JSON.stringify(requestBody) });
@@ -772,8 +802,9 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
         return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
       }
 
-      const managed = managedToolBatch(result, config);
-      if (!managed || limitContinuation) return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
+      const managed = managedToolBatch(result, effectiveConfig);
+      if (!managed) return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
+      if (disabledManagedKinds.has(managed.kind)) return managedLimitRepeatedResponse(managed.kind, stats);
       const { kind } = managed;
       const maxBatch = positiveInteger(config.managedWebToolsMaxBatch, 8);
       const calls = managed.calls.slice(0, maxBatch);
@@ -809,7 +840,10 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
       };
 
       if (kind === 'search') {
-        const maxUses = positiveInteger(config.searxngMaxUses, 5);
+        const configuredMaxUses = positiveInteger(config.searxngMaxUses, 5);
+        const maxUses = hostedSearchPolicy?.maxUses
+          ? Math.min(configuredMaxUses, hostedSearchPolicy.maxUses)
+          : configuredMaxUses;
         const remaining = Math.max(0, maxUses - stats.searchUses);
         const executable = calls.slice(0, remaining);
         const limited = calls.slice(remaining);
@@ -821,7 +855,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
           config.webSearchMaxParallel,
           async (call) => {
             try {
-              const normalized = await executeSearch(fetchImpl, call, config, upstreamInit.signal);
+              const normalized = await executeSearch(fetchImpl, call, effectiveConfig, upstreamInit.signal, hostedSearchPolicy);
               return { call, content: normalized.text, isError: false, resultCount: normalized.results.length };
             } catch (error) {
               if (upstreamInit.signal?.aborted) throw error;
@@ -850,10 +884,10 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
           results[managed.calls.indexOf(call)] = entry;
           await emitProgress(entry);
         }
-        requestBody = appendToolResults(requestBody, result, results, config);
+        requestBody = appendToolResults(requestBody, result, results, effectiveConfig);
         if (limited.length > 0 || overflow.length > 0) {
-          requestBody = removeManagedTools(requestBody, config, 'search');
-          limitContinuation = true;
+          requestBody = removeManagedTools(requestBody, effectiveConfig, 'search');
+          disabledManagedKinds.add('search');
         }
         continue;
       }
@@ -899,10 +933,10 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
         results[managed.calls.indexOf(call)] = entry;
         await emitProgress(entry);
       }
-      requestBody = appendToolResults(requestBody, result, results, config);
+      requestBody = appendToolResults(requestBody, result, results, effectiveConfig);
       if (limited.length > 0 || overflow.length > 0) {
-        requestBody = removeManagedTools(requestBody, config, 'fetch');
-        limitContinuation = true;
+        requestBody = removeManagedTools(requestBody, effectiveConfig, 'fetch');
+        disabledManagedKinds.add('fetch');
       }
     }
   };

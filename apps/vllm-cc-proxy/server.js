@@ -14,6 +14,7 @@ import {
 } from '../../packages/anthropic/claude-code-tools/recovery.js';
 import { createProtocolProxyRuntime } from '../../packages/server/create-proxy-server.js';
 import { createAnthropicManagedWebToolsFetch } from '../../packages/anthropic/managed-web-tools.js';
+import { isAnthropicHostedWebSearchTool } from '../../packages/anthropic/hosted-web-tools.js';
 import {
   buildAnthropicActionRequiredRecovery,
   buildAnthropicOutputRequiredRecovery,
@@ -107,6 +108,10 @@ export function loadAnthropicConfig(env = process.env) {
   });
 }
 
+function hostedWebSearchTools(body) {
+  return Array.isArray(body?.tools) ? body.tools.filter(isAnthropicHostedWebSearchTool) : [];
+}
+
 export function createAnthropicGuardedRoute(config, options = {}) {
   return {
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
@@ -119,8 +124,13 @@ export function createAnthropicGuardedRoute(config, options = {}) {
       const incoming = summarizeAnthropicToolContext(originalBody);
       const upstream = summarizeAnthropicToolContext(body);
       const execution = summarizeAnthropicExecutionContext(originalBody);
+      const hostedTools = hostedWebSearchTools(originalBody);
       return {
         ...execution,
+        incomingHostedWebSearchCount: hostedTools.length,
+        hostedWebSearchAdapted: hostedTools.length > 0
+          && Array.isArray(body?.tools)
+          && body.tools.some((tool) => tool?.name === 'web_search' && tool?.input_schema?.type === 'object'),
         incomingToolCount: incoming.requestToolCount,
         incomingToolNames: incoming.requestToolNames,
         incomingToolChoice: incoming.requestToolChoice,
@@ -131,6 +141,14 @@ export function createAnthropicGuardedRoute(config, options = {}) {
         upstreamToolsEnabled: upstream.requestToolsEnabled,
         toolSetPreserved: JSON.stringify(incoming.requestToolNames) === JSON.stringify(upstream.requestToolNames),
       };
+    },
+    onPreparedRequest({ diagnostics, logger }) {
+      if (!diagnostics.hostedWebSearchAdapted) return;
+      logger.info('anthropic_hosted_web_search_adapted', {
+        count: diagnostics.incomingHostedWebSearchCount,
+        upstreamToolName: 'web_search',
+        managed: true,
+      });
     },
     validateAttempt(attempt, { originalBody, firstBody, recovery = false }) {
       const output = anthropicMessagesAdapter.extractOutput(attempt.result);
@@ -233,6 +251,21 @@ export function createAnthropicGuardedRoute(config, options = {}) {
       return actionValidation.ok ? { ...actionValidation, normalization } : actionValidation;
     },
     classifyAttempt(attempt, { phase, recovery }) {
+      const repeatedManagedKind = attempt?.headers?.get?.('x-vllm-proxy-managed-web-limit-repeated');
+      if (attempt.kind === 'http_error' && attempt.status === 422 && ['search', 'fetch'].includes(repeatedManagedKind)) {
+        return {
+          ...attempt,
+          kind: 'invalid',
+          reason: 'managed_web_tool_limit_repeated',
+          detail: `The model called disabled managed ${repeatedManagedKind} tooling after its bounded use limit was reached.`,
+          retryable: false,
+          diagnostics: {
+            ...(attempt.diagnostics || {}),
+            managedWebToolKind: repeatedManagedKind,
+            managedWebToolLimitRepeated: true,
+          },
+        };
+      }
       if (
         phase !== 'recovery'
         || !['action_required', 'output_required'].includes(recovery?.plan?.mode)

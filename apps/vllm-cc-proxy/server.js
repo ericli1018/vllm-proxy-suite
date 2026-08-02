@@ -71,6 +71,12 @@ export function loadAnthropicConfig(env = process.env) {
         ?? env.ACTION_REQUIRED_RECOVERY_DISABLE_THINKING,
       true,
     ),
+    claudeCodeForcedToolRecoveryMaxTextBytes: boundedInteger(
+      env.CLAUDE_CODE_FORCED_TOOL_RECOVERY_MAX_TEXT_BYTES,
+      1024,
+      0,
+      65536,
+    ),
     managedWebSearchEnabled: parseBoolean(env.CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED, false),
     managedWebSearchToolNames: parseCsv(env.CLAUDE_CODE_WEBSEARCH_TOOL_NAMES || 'WebSearch'),
     managedWebFetchEnabled: parseBoolean(env.CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED, false),

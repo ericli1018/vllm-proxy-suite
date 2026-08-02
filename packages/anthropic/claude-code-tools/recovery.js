@@ -568,6 +568,10 @@ export function buildClaudeCodeToolRecovery({ original, prepared = null, issue, 
   }
   const readAvailable = Boolean(toolByName(original, TOOL_NAMES.READ));
   const useRead = Boolean(readAvailable && !context.hasFreshRead);
+  const maxAuxiliaryTextBytes = Number.isSafeInteger(config?.claudeCodeForcedToolRecoveryMaxTextBytes)
+    && config.claudeCodeForcedToolRecoveryMaxTextBytes >= 0
+    ? config.claudeCodeForcedToolRecoveryMaxTextBytes
+    : 1024;
   const plan = useRead
     ? {
       mode: 'read_target',
@@ -576,6 +580,7 @@ export function buildClaudeCodeToolRecovery({ original, prepared = null, issue, 
       rejectedToolName: context.toolName,
       rejectedArguments: structuredClone(context.rejectedArguments || {}),
       rejectedFingerprint: context.rejectedFingerprint,
+      maxAuxiliaryTextBytes,
     }
     : {
       mode: 'retry_mutation',
@@ -583,6 +588,7 @@ export function buildClaudeCodeToolRecovery({ original, prepared = null, issue, 
       targetPath: context.targetPath,
       rejectedArguments: structuredClone(context.rejectedArguments || {}),
       rejectedFingerprint: context.rejectedFingerprint,
+      maxAuxiliaryTextBytes,
     };
 
   const selected = toolByName(original, plan.toolName);
@@ -675,7 +681,7 @@ function schemaCorrectionFailure(detail, plan, diagnostics = {}) {
 
 export function validateClaudeCodeSchemaCorrectionRecovery(output, plan) {
   if (plan?.mode !== 'schema_correction') return { ok: true };
-  const selected = recoveryCall(output);
+  const selected = recoveryCall(output, { maxAuxiliaryTextBytes: 0 });
   if (!selected.ok) return schemaCorrectionFailure(selected.reason, plan, { recoveryFailureReason: selected.reason });
   const call = selected.call;
   if (call.name !== plan.toolName) {
@@ -707,13 +713,33 @@ export function validateClaudeCodeSchemaCorrectionRecovery(output, plan) {
   return { ok: true };
 }
 
-function recoveryCall(output) {
+function recoveryCall(output, {
+  maxAuxiliaryTextBytes = 0,
+  excessTextReason = 'forced_tool_recovery_has_text',
+} = {}) {
   const calls = Array.isArray(output?.toolCalls) ? output.toolCalls : [];
   if (calls.length !== 1) return invalid('forced_tool_call_missing');
-  if (typeof output?.finalText === 'string' && output.finalText.trim()) {
-    return invalid('forced_tool_recovery_has_text');
+
+  const auxiliaryText = typeof output?.finalText === 'string' ? output.finalText.trim() : '';
+  const auxiliaryTextBytes = auxiliaryText ? Buffer.byteLength(auxiliaryText, 'utf8') : 0;
+  const normalizedLimit = Number.isSafeInteger(maxAuxiliaryTextBytes) && maxAuxiliaryTextBytes >= 0
+    ? maxAuxiliaryTextBytes
+    : 0;
+  const diagnostics = {
+    recoveryAuxiliaryTextPresent: auxiliaryTextBytes > 0,
+    recoveryAuxiliaryTextBytes: auxiliaryTextBytes,
+    recoveryAuxiliaryTextLimitBytes: normalizedLimit,
+  };
+  if (auxiliaryTextBytes > normalizedLimit) {
+    return terminalRecoveryFailure(
+      excessTextReason,
+      excessTextReason === 'forced_tool_recovery_has_text'
+        ? 'The forced Tool Recovery produced visible text.'
+        : 'The forced Tool Recovery produced more auxiliary text than allowed.',
+      diagnostics,
+    );
   }
-  return { ok: true, call: calls[0] };
+  return { ok: true, call: calls[0], diagnostics };
 }
 
 function terminalRecoveryFailure(reason, detail = reason, diagnostics = undefined) {
@@ -727,40 +753,46 @@ function terminalRecoveryFailure(reason, detail = reason, diagnostics = undefine
 }
 
 export function validateClaudeCodeToolRecovery(output, plan) {
-  const selected = recoveryCall(output);
-  if (!selected.ok) return terminalRecoveryFailure(selected.reason);
+  const selected = recoveryCall(output, {
+    maxAuxiliaryTextBytes: Number.isSafeInteger(plan?.maxAuxiliaryTextBytes) ? plan.maxAuxiliaryTextBytes : 1024,
+    excessTextReason: 'forced_tool_recovery_excess_text',
+  });
+  if (!selected.ok) return selected;
   const call = selected.call;
-  if (call.name !== plan.toolName) return terminalRecoveryFailure('forced_tool_name_mismatch');
-  if (!isPlainObject(call.parsedArguments)) return terminalRecoveryFailure('invalid_claude_code_tool_input');
+  if (call.name !== plan.toolName) return terminalRecoveryFailure('forced_tool_name_mismatch', 'forced_tool_name_mismatch', selected.diagnostics);
+  if (!isPlainObject(call.parsedArguments)) return terminalRecoveryFailure('invalid_claude_code_tool_input', 'invalid_claude_code_tool_input', selected.diagnostics);
   if (plan.inputSchema) {
     const schemaValidation = validateAgainstToolSchema(
       { name: plan.toolName, input_schema: plan.inputSchema },
       call.parsedArguments,
     );
-    if (!schemaValidation.ok) return terminalRecoveryFailure(schemaValidation.reason, schemaValidation.detail, schemaValidation.diagnostics);
+    if (!schemaValidation.ok) return terminalRecoveryFailure(schemaValidation.reason, schemaValidation.detail, {
+      ...selected.diagnostics,
+      ...(schemaValidation.diagnostics || {}),
+    });
   }
   const actualTarget = targetPathFor(call.name, call.parsedArguments);
-  if (actualTarget !== plan.targetPath) return terminalRecoveryFailure('recovery_target_mismatch');
+  if (actualTarget !== plan.targetPath) return terminalRecoveryFailure('recovery_target_mismatch', 'recovery_target_mismatch', selected.diagnostics);
 
-  if (plan.mode === 'read_target') return { ok: true };
+  if (plan.mode === 'read_target') return { ok: true, diagnostics: selected.diagnostics };
 
   if (call.name === TOOL_NAMES.EDIT) {
     if (typeof call.parsedArguments.old_string !== 'string' || typeof call.parsedArguments.new_string !== 'string') {
-      return terminalRecoveryFailure('invalid_claude_code_tool_input');
+      return terminalRecoveryFailure('invalid_claude_code_tool_input', 'invalid_claude_code_tool_input', selected.diagnostics);
     }
     if (call.parsedArguments.old_string === call.parsedArguments.new_string) {
-      return terminalRecoveryFailure('no_op_edit_tool_call');
+      return terminalRecoveryFailure('no_op_edit_tool_call', 'no_op_edit_tool_call', selected.diagnostics);
     }
     if (plan.rejectedArguments?.replace_all !== true && call.parsedArguments.replace_all === true) {
-      return terminalRecoveryFailure('recovery_scope_widened');
+      return terminalRecoveryFailure('recovery_scope_widened', 'recovery_scope_widened', selected.diagnostics);
     }
   }
 
   const currentFingerprint = fingerprint(call.name, call.parsedArguments);
   if (plan.rejectedFingerprint && currentFingerprint === plan.rejectedFingerprint) {
-    return terminalRecoveryFailure(repeatedReason(call.name), repeatedFailureMessage(call.name));
+    return terminalRecoveryFailure(repeatedReason(call.name), repeatedFailureMessage(call.name), selected.diagnostics);
   }
-  return { ok: true };
+  return { ok: true, diagnostics: selected.diagnostics };
 }
 
 export const CLAUDE_CODE_TOOL_NAMES = TOOL_NAMES;

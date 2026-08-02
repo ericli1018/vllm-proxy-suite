@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.17 - 2026-08-02
+
+- Allowed a forced Claude Code file Tool Recovery to include bounded auxiliary visible text when it also contains exactly one valid forced Tool Call.
+- Kept the safety boundary on Tool count, Tool name, request `input_schema`, exact target path, no-op detection, scope widening, and repeated mutation fingerprints; visible text never substitutes for a Tool Call.
+- Added `CLAUDE_CODE_FORCED_TOOL_RECOVERY_MAX_TEXT_BYTES`, default `1024` UTF-8 bytes and bounded to `0`–`65536`. Excess text fuses as `forced_tool_recovery_excess_text`, HTTP `422`, `retryable:false`, with no third upstream Attempt.
+- Preserved the zero-text policy for Targeted Schema Correction Recovery.
+- Added bounded diagnostics and the `forced_tool_recovery_auxiliary_text_accepted` event without logging the text body.
+- Added unit, configuration, and full-runtime regressions for accepted short preambles and over-limit fail-closed behavior.
+
 ## 0.7.16 - 2026-08-02
 
 - Disabled model Thinking only for the single bounded Anthropic `output_required` and `action_required` Recovery requests by setting both `think:false` and `chat_template_kwargs.enable_thinking:false`.

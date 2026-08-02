@@ -774,7 +774,7 @@ Tool arguments 不符合本次 tools[].input_schema
 → 阻擋結構不合法的 mutation
 ```
 
-Recovery 必須只有一個允許的 Tool Call、不能帶 Final Text、不能改變 target。沒有足夠證據證明修復安全時，Proxy fail closed。任何最終 `invalid + retryable:false` 語意熔斷都使用 HTTP `422` 並記錄 `client_retry_suppressed`，不再以 `502` 誘發 Claude Code 的 `attempt 1/10`；API Error 也不會直接回放 `<tool_use_error>` 原文。
+Recovery 必須只有一個允許的 Tool Call，且 Tool 名稱、`input_schema` 與 target 都必須精確符合 Recovery Plan。模型可在有效 Tool Call 前附帶有界短文字；預設最多 `1024` UTF-8 bytes，文字不能代替 Tool Call，也不能放寬數量、Schema 或 target。超限時回 `forced_tool_recovery_excess_text`、HTTP `422`、`retryable:false`，且不建立第三次上游 Attempt。接受短文字時記錄 `forced_tool_recovery_auxiliary_text_accepted`，只記錄 byte 數，不記錄文字內容。Targeted Schema Correction 仍維持零文字嚴格策略。沒有足夠證據證明修復安全時，Proxy fail closed。任何最終 `invalid + retryable:false` 語意熔斷都使用 HTTP `422` 並記錄 `client_retry_suppressed`，不再以 `502` 誘發 Claude Code 的 `attempt 1/10`；API Error 也不會直接回放 `<tool_use_error>` 原文。
 
 Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前次 generation 已丟棄、Recovery 是正常流程、不得解釋前次失敗，只執行下一個有效動作。
 
@@ -917,6 +917,7 @@ targetless_tool_recovery_fused
 | `CLAUDE_CODE_BASH_INVALIDATES_READS` | `true` |
 | `CLAUDE_CODE_OUTPUT_REQUIRED_RECOVERY_DISABLE_THINKING` | `true`；僅在 Output-Required Recovery 設定 `think=false` 與 `enable_thinking=false` |
 | `CLAUDE_CODE_ACTION_REQUIRED_RECOVERY_DISABLE_THINKING` | `true`；僅在 Action-Required Recovery 設定 `think=false` 與 `enable_thinking=false` |
+| `CLAUDE_CODE_FORCED_TOOL_RECOVERY_MAX_TEXT_BYTES` | `1024`；檔案 Tool 強制 Recovery 可附帶的 UTF-8 短文字上限，範圍 `0`～`65536`；超限直接 422 |
 
 ## Health 與 Metrics
 

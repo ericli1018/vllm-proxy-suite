@@ -36,6 +36,7 @@ test('Anthropic service enables Claude Code tool recovery by default and permits
   assert.equal(enabled.claudeCodeBashInvalidatesReads, true);
   assert.equal(enabled.outputRequiredRecoveryDisableThinking, true);
   assert.equal(enabled.actionRequiredRecoveryDisableThinking, true);
+  assert.equal(enabled.claudeCodeForcedToolRecoveryMaxTextBytes, 1024);
 
   const disabled = loadAnthropicConfig({
     CLAUDE_CODE_TOOL_RECOVERY_ENABLED: 'false',
@@ -47,6 +48,7 @@ test('Anthropic service enables Claude Code tool recovery by default and permits
     CLAUDE_CODE_BASH_INVALIDATES_READS: 'false',
     CLAUDE_CODE_OUTPUT_REQUIRED_RECOVERY_DISABLE_THINKING: 'false',
     CLAUDE_CODE_ACTION_REQUIRED_RECOVERY_DISABLE_THINKING: 'false',
+    CLAUDE_CODE_FORCED_TOOL_RECOVERY_MAX_TEXT_BYTES: '256',
   });
   assert.equal(disabled.claudeCodeToolRecoveryEnabled, false);
   assert.equal(disabled.claudeCodeActionIntentGuardEnabled, false);
@@ -57,6 +59,7 @@ test('Anthropic service enables Claude Code tool recovery by default and permits
   assert.equal(disabled.claudeCodeBashInvalidatesReads, false);
   assert.equal(disabled.outputRequiredRecoveryDisableThinking, false);
   assert.equal(disabled.actionRequiredRecoveryDisableThinking, false);
+  assert.equal(disabled.claudeCodeForcedToolRecoveryMaxTextBytes, 256);
 });
 
 test('Anthropic guarded route converts no-op Edit into exact Read recovery', () => {

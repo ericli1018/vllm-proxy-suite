@@ -287,12 +287,25 @@ test('corrected Edit recovery rejects no-op, wrong target, and replace_all widen
   ]), plan).reason, 'recovery_scope_widened');
 });
 
-test('tool recovery requires one tool call and no final text', () => {
-  const plan = { mode: 'read_target', toolName: 'Read', targetPath: '/work/a.js' };
+test('tool recovery requires one tool call and permits bounded auxiliary text', () => {
+  const plan = { mode: 'read_target', toolName: 'Read', targetPath: '/work/a.js', maxAuxiliaryTextBytes: 64 };
   assert.equal(validateClaudeCodeToolRecovery(output([], 'I will read it'), plan).reason, 'forced_tool_call_missing');
-  assert.equal(validateClaudeCodeToolRecovery(output([
+
+  const accepted = validateClaudeCodeToolRecovery(output([
     { id: 'r1', name: 'Read', parsedArguments: { file_path: '/work/a.js' } },
-  ], 'Reading now'), plan).reason, 'forced_tool_recovery_has_text');
+  ], 'Reading now'), plan);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.diagnostics.recoveryAuxiliaryTextPresent, true);
+  assert.equal(accepted.diagnostics.recoveryAuxiliaryTextBytes, 11);
+
+  const rejected = validateClaudeCodeToolRecovery(output([
+    { id: 'r2', name: 'Read', parsedArguments: { file_path: '/work/a.js' } },
+  ], 'x'.repeat(65)), plan);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, 'forced_tool_recovery_excess_text');
+  assert.equal(rejected.retryable, false);
+  assert.equal(rejected.diagnostics.recoveryAuxiliaryTextBytes, 65);
+  assert.equal(rejected.diagnostics.recoveryAuxiliaryTextLimitBytes, 64);
 });
 
 test('tool recovery fails closed when rejected mutation has no exact target', () => {

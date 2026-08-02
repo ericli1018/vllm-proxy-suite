@@ -87,7 +87,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.16') errors.push('package.json version must be 0.7.16');
+if (packageJson.version !== '0.7.17') errors.push('package.json version must be 0.7.17');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -105,6 +105,7 @@ if (!compose.includes('VLLM_CC_PROXY_API_KEY')) errors.push('Compose must expose
 if (!compose.includes('VLLM_OPENAI_PROXY_API_KEY')) errors.push('Compose must expose the OpenAI API key');
 if (!compose.includes('CLAUDE_CODE_OUTPUT_REQUIRED_RECOVERY_DISABLE_THINKING')) errors.push('Compose must expose Output-Required Recovery thinking policy');
 if (!compose.includes('CLAUDE_CODE_ACTION_REQUIRED_RECOVERY_DISABLE_THINKING')) errors.push('Compose must expose Action-Required Recovery thinking policy');
+if (!compose.includes('CLAUDE_CODE_FORCED_TOOL_RECOVERY_MAX_TEXT_BYTES')) errors.push('Compose must expose forced Tool Recovery auxiliary-text limit');
 if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_MODE')) errors.push('Compose must expose managed progress mode');
 if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_DETAIL')) errors.push('Compose must expose managed progress detail');
 if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS')) errors.push('Compose must expose managed progress interval');

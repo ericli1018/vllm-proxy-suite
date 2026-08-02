@@ -917,6 +917,22 @@ export function createProtocolProxyRuntime({
               ['action_required', 'schema_correction'].includes(recovery.plan?.mode),
             );
             attempt = { kind: 'invalid', ...recoveryValidation, result: attempt.result };
+          } else if (recoveryValidation.diagnostics) {
+            attempt = {
+              ...attempt,
+              diagnostics: {
+                ...(attempt.diagnostics || {}),
+                ...recoveryValidation.diagnostics,
+              },
+            };
+            if (recoveryValidation.diagnostics.recoveryAuxiliaryTextPresent) {
+              requestLogger.info('forced_tool_recovery_auxiliary_text_accepted', {
+                recoveryMode: recovery.plan?.mode || null,
+                recoveryToolName: recovery.plan?.toolName || null,
+                recoveryAuxiliaryTextBytes: recoveryValidation.diagnostics.recoveryAuxiliaryTextBytes,
+                recoveryAuxiliaryTextLimitBytes: recoveryValidation.diagnostics.recoveryAuxiliaryTextLimitBytes,
+              });
+            }
           }
         }
         if (attempt.kind === 'success' || attempt.kind === 'tool_passthrough') {

@@ -58,6 +58,20 @@ function toolSse({ id, name, input }) {
   ].join('');
 }
 
+function textAndToolSse({ text, id, name, input }) {
+  return [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"m1","type":"message","role":"assistant","content":[],"model":"m","usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+    `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`,
+    `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })}\n\n`,
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id, name, input: {} } })}\n\n`,
+    `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } })}\n\n`,
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":10}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join('');
+}
+
 function createRoute(config) {
   return {
     adapter: anthropicMessagesAdapter,
@@ -147,6 +161,118 @@ test('semantic no-op Edit is discarded and only exact Read recovery reaches Clau
   assert.deepEqual(received[1].tools.map((tool) => tool.name), ['Read']);
   assert.deepEqual(received[1].tool_choice, { type: 'tool', name: 'Read' });
   assert.match(received[1].system, /recovery is expected/i);
+});
+
+
+test('forced Read recovery accepts a short visible preamble and delivers the valid tool call', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain */ }
+    attempts += 1;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (attempts === 1) {
+      res.end(toolSse({
+        id: 'bad-edit',
+        name: 'Edit',
+        input: { file_path: '/work/a.js', old_string: 'same', new_string: 'same' },
+      }));
+    } else {
+      res.end(textAndToolSse({
+        text: 'Reading the current file first.',
+        id: 'read-current',
+        name: 'Read',
+        input: { file_path: '/work/a.js' },
+      }));
+    }
+  });
+  const upstreamUrl = await listen(upstream);
+  const config = { ...configFor(upstreamUrl), claudeCodeForcedToolRecoveryMaxTextBytes: 128 };
+  const suite = createProtocolProxyServer({
+    name: 'test-cc',
+    metricPrefix: 'test_cc',
+    config,
+    guardedRoutes: new Map([['/v1/messages', createRoute(config)]]),
+    allowPassthrough: () => false,
+    formatJsonError: (type, message, requestId) => ({ type: 'error', error: { type, message }, request_id: requestId }),
+  });
+  const proxyUrl = await suite.start();
+  t.after(async () => { await suite.stop(); upstream.close(); });
+
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'm', stream: true, max_tokens: 8192,
+      messages: [{ role: 'user', content: 'edit it' }],
+      tools: [
+        { name: 'Read', input_schema: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] } },
+        { name: 'Edit', input_schema: { type: 'object', properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['file_path', 'old_string', 'new_string'] } },
+      ],
+    }),
+  });
+  const text = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.equal(attempts, 2);
+  assert.match(text, /Reading the current file first/);
+  assert.match(text, /"name":"Read"/);
+  assert.doesNotMatch(text, /forced_tool_recovery_has_text/);
+});
+
+
+test('forced Tool Recovery rejects excess auxiliary text without a third upstream attempt', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain */ }
+    attempts += 1;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (attempts === 1) {
+      res.end(toolSse({
+        id: 'bad-edit',
+        name: 'Edit',
+        input: { file_path: '/work/a.js', old_string: 'same', new_string: 'same' },
+      }));
+    } else {
+      res.end(textAndToolSse({
+        text: 'x'.repeat(129),
+        id: 'read-current',
+        name: 'Read',
+        input: { file_path: '/work/a.js' },
+      }));
+    }
+  });
+  const upstreamUrl = await listen(upstream);
+  const config = { ...configFor(upstreamUrl), claudeCodeForcedToolRecoveryMaxTextBytes: 128 };
+  const suite = createProtocolProxyServer({
+    name: 'test-cc',
+    metricPrefix: 'test_cc',
+    config,
+    guardedRoutes: new Map([['/v1/messages', createRoute(config)]]),
+    allowPassthrough: () => false,
+    formatJsonError: (type, message, requestId) => ({ type: 'error', error: { type, message }, request_id: requestId }),
+  });
+  const proxyUrl = await suite.start();
+  t.after(async () => { await suite.stop(); upstream.close(); });
+
+  const response = await fetch(`${proxyUrl}/v1/messages`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'm', stream: true, max_tokens: 8192,
+      messages: [{ role: 'user', content: 'edit it' }],
+      tools: [
+        { name: 'Read', input_schema: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] } },
+        { name: 'Edit', input_schema: { type: 'object', properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['file_path', 'old_string', 'new_string'] } },
+      ],
+    }),
+  });
+  const text = await response.text();
+
+  assert.equal(response.status, 422);
+  assert.equal(attempts, 2);
+  assert.match(text, /forced_tool_recovery_excess_text/);
+  assert.match(text, /retryable/);
+  assert.doesNotMatch(text, /"name":"Read"/);
 });
 
 test('successful Read after unread-file Write failure allows the exact Write without recovery', async (t) => {

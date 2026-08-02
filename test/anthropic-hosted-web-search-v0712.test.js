@@ -259,10 +259,8 @@ test('repeated managed tool call after its limit is fused without another model 
       });
     }
     vllmBodies.push(JSON.parse(init.body));
-    if (vllmBodies.length > 3) throw new Error('unexpected managed loop');
-    if (vllmBodies.length === 1) return sseResponse([{ type: 'tool_use', id: 's1', name: 'WebSearch', input: { query: 'first' } }], 'tool_use');
-    if (vllmBodies.length === 2) return sseResponse([{ type: 'tool_use', id: 's2', name: 'WebSearch', input: { query: 'second' } }], 'tool_use');
-    return sseResponse([{ type: 'tool_use', id: 's3', name: 'WebSearch', input: { query: 'third' } }], 'tool_use');
+    if (vllmBodies.length > 4) throw new Error('unexpected managed loop');
+    return sseResponse([{ type: 'tool_use', id: `s${vllmBodies.length}`, name: 'WebSearch', input: { query: `q${vllmBodies.length}` } }], 'tool_use');
   };
 
   const wrapped = createAnthropicManagedWebToolsFetch(fetchImpl, managedConfig({ searxngMaxUses: 1 }));
@@ -277,7 +275,7 @@ test('repeated managed tool call after its limit is fused without another model 
   assert.equal(payload.error.retryable, false);
   assert.equal(payload.error.kind, 'search');
   assert.equal(searxngCalls, 1);
-  assert.equal(vllmBodies.length, 3);
+  assert.equal(vllmBodies.length, 4);
 });
 
 test('full proxy preserves bounded managed limit failure as non-retryable SSE error without another model request', async (t) => {
@@ -300,10 +298,8 @@ test('full proxy preserves bounded managed limit failure as non-retryable SSE er
       });
     }
     vllmBodies.push(JSON.parse(init.body));
-    if (vllmBodies.length > 3) throw new Error('unexpected managed loop');
-    if (vllmBodies.length === 1) return sseResponse([{ type: 'tool_use', id: 's1', name: 'web_search', input: { query: 'first' } }], 'tool_use');
-    if (vllmBodies.length === 2) return sseResponse([{ type: 'tool_use', id: 's2', name: 'web_search', input: { query: 'second' } }], 'tool_use');
-    return sseResponse([{ type: 'tool_use', id: 's3', name: 'web_search', input: { query: 'third' } }], 'tool_use');
+    if (vllmBodies.length > 4) throw new Error('unexpected managed loop');
+    return sseResponse([{ type: 'tool_use', id: `s${vllmBodies.length}`, name: 'web_search', input: { query: `q${vllmBodies.length}` } }], 'tool_use');
   };
 
   const runtime = createAnthropicProxyRuntime({ config, fetchImpl, exposeControlRoutes: false });
@@ -328,5 +324,5 @@ test('full proxy preserves bounded managed limit failure as non-retryable SSE er
   assert.equal(payload.error.retryable, false);
   assert.equal(payload.error.managedWebToolKind, 'search');
   assert.equal(searxngCalls, 1);
-  assert.equal(vllmBodies.length, 3);
+  assert.equal(vllmBodies.length, 4);
 });

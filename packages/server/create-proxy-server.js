@@ -71,6 +71,9 @@ function createMetrics() {
     managedWebFetchChunksTotal: 0,
     awesomeWebFetchExecutionsTotal: 0,
     awesomeWebFetchReroutesTotal: 0,
+    managedWebLimitFinalizationsTotal: 0,
+    managedWebMixedBatchDeferralsTotal: 0,
+    managedHostedToolEscapesTotal: 0,
     managedWebToolItemsCompletedTotal: 0,
     managedWebToolProgressPingsTotal: 0,
     managedStreamProgressDeltasTotal: 0,
@@ -1076,7 +1079,7 @@ export function createProtocolProxyRuntime({
       const failureReason = attempt.reason || attempt.loopInfo?.reason || 'unknown';
       const clientRetrySuppressed = attempt.kind === 'invalid'
         && attempt.retryable === false
-        && ['action_intent_without_tool_call', 'managed_web_tool_limit_repeated'].includes(failureReason);
+        && ['action_intent_without_tool_call', 'managed_web_tool_limit_repeated', 'managed_web_mixed_batch_repeated', 'managed_hosted_tool_escape'].includes(failureReason);
       const status = attempt.kind === 'http_error' && attempt.status < 500
         ? attempt.status
         : (clientRetrySuppressed ? 422 : 502);

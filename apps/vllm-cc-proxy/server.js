@@ -273,6 +273,32 @@ export function createAnthropicGuardedRoute(config, options = {}) {
           },
         };
       }
+      if (attempt.kind === 'http_error' && attempt.status === 422 && attempt?.headers?.get?.('x-vllm-proxy-managed-web-mixed-batch-repeated') === 'true') {
+        return {
+          ...attempt,
+          kind: 'invalid',
+          reason: 'managed_web_mixed_batch_repeated',
+          detail: 'The model repeatedly mixed proxy-managed web tooling with client-executed tools in one parallel batch.',
+          retryable: false,
+          diagnostics: {
+            ...(attempt.diagnostics || {}),
+            managedWebMixedBatchRepeated: true,
+          },
+        };
+      }
+      if (attempt.kind === 'http_error' && attempt.status === 422 && attempt?.headers?.get?.('x-vllm-proxy-managed-hosted-tool-escape') === 'true') {
+        return {
+          ...attempt,
+          kind: 'invalid',
+          reason: 'managed_hosted_tool_escape',
+          detail: 'A proxy-managed hosted web_search tool call was blocked from escaping to the client.',
+          retryable: false,
+          diagnostics: {
+            ...(attempt.diagnostics || {}),
+            managedHostedToolEscape: true,
+          },
+        };
+      }
       if (
         phase !== 'recovery'
         || !['action_required', 'output_required'].includes(recovery?.plan?.mode)
@@ -377,11 +403,22 @@ export function createAnthropicGuardedRoute(config, options = {}) {
       const fetchChunks = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-chunks') || '0', 10) || 0;
       const browserFetchUses = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-awesome-web-fetch-uses') || '0', 10) || 0;
       const browserFetchReroutes = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-awesome-web-fetch-reroutes') || '0', 10) || 0;
+      const searchLimitFinalizations = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-websearch-limit-finalizations') || '0', 10) || 0;
+      const fetchLimitFinalizations = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-limit-finalizations') || '0', 10) || 0;
+      const mixedBatchDeferrals = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-web-mixed-batch-deferrals') || '0', 10) || 0;
+      const hostedToolEscape = attempt?.headers?.get?.('x-vllm-proxy-managed-hosted-tool-escape') === 'true';
       if (uses > 0 || failures > 0 || limitReached) {
         metrics.managedWebSearchExecutionsTotal += uses;
         metrics.managedWebSearchFailuresTotal += failures;
         if (limitReached) metrics.managedWebSearchLimitsTotal += 1;
-        logger.info('managed_websearch_completed', { attempt: attemptNumber, phase, uses, failures, limitReached });
+        logger.info('managed_websearch_completed', {
+          attempt: attemptNumber,
+          phase,
+          uses,
+          failures,
+          limitReached,
+          limitFinalizations: searchLimitFinalizations,
+        });
       }
       if (fetchUses > 0 || fetchFailures > 0 || fetchLimitReached) {
         metrics.managedWebFetchExecutionsTotal += fetchUses;
@@ -399,8 +436,27 @@ export function createAnthropicGuardedRoute(config, options = {}) {
           browserUses: browserFetchUses,
           browserReroutes: browserFetchReroutes,
           limitReached: fetchLimitReached,
+          limitFinalizations: fetchLimitFinalizations,
         });
       }
+      if (searchLimitFinalizations > 0 || fetchLimitFinalizations > 0) {
+        metrics.managedWebLimitFinalizationsTotal += searchLimitFinalizations + fetchLimitFinalizations;
+        logger.info('managed_web_limit_finalization_completed', {
+          attempt: attemptNumber,
+          phase,
+          searchFinalizations: searchLimitFinalizations,
+          fetchFinalizations: fetchLimitFinalizations,
+        });
+      }
+      if (mixedBatchDeferrals > 0) {
+        metrics.managedWebMixedBatchDeferralsTotal += mixedBatchDeferrals;
+        logger.info('managed_web_mixed_batch_serialized', {
+          attempt: attemptNumber,
+          phase,
+          deferrals: mixedBatchDeferrals,
+        });
+      }
+      if (hostedToolEscape) metrics.managedHostedToolEscapesTotal += 1;
     },
   };
 }

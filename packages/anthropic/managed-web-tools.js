@@ -204,27 +204,60 @@ function responseFromRaw(upstream, rawBody, stats = null) {
   if (stats?.fetchChunks > 0) headers.set('x-vllm-proxy-managed-webfetch-chunks', String(stats.fetchChunks));
   if (stats?.browserFetchUses > 0) headers.set('x-vllm-proxy-awesome-web-fetch-uses', String(stats.browserFetchUses));
   if (stats?.browserFetchReroutes > 0) headers.set('x-vllm-proxy-awesome-web-fetch-reroutes', String(stats.browserFetchReroutes));
+  if (stats?.searchLimitFinalizations > 0) headers.set('x-vllm-proxy-managed-websearch-limit-finalizations', String(stats.searchLimitFinalizations));
+  if (stats?.fetchLimitFinalizations > 0) headers.set('x-vllm-proxy-managed-webfetch-limit-finalizations', String(stats.fetchLimitFinalizations));
+  if (stats?.mixedBatchDeferrals > 0) headers.set('x-vllm-proxy-managed-web-mixed-batch-deferrals', String(stats.mixedBatchDeferrals));
   return new Response(rawBody, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
-function managedLimitRepeatedResponse(kind, stats) {
+function managedFailureResponse(type, message, details, stats, headers = {}) {
   const rawBody = Buffer.from(JSON.stringify({
     type: 'error',
     error: {
-      type: 'managed_web_tool_limit_repeated',
-      message: `The model called disabled managed ${kind} tooling after its bounded use limit was reached.`,
+      type,
+      message,
       retryable: false,
-      kind,
+      ...details,
     },
   }));
   const upstream = new Response(rawBody, {
     status: 422,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      'x-vllm-proxy-managed-web-limit-repeated': kind,
+      ...headers,
     },
   });
   return responseFromRaw(upstream, rawBody, stats);
+}
+
+function managedLimitRepeatedResponse(kind, stats) {
+  return managedFailureResponse(
+    'managed_web_tool_limit_repeated',
+    `The model called disabled managed ${kind} tooling after its bounded use limit was reached.`,
+    { kind },
+    stats,
+    { 'x-vllm-proxy-managed-web-limit-repeated': kind },
+  );
+}
+
+function managedMixedBatchRepeatedResponse(stats) {
+  return managedFailureResponse(
+    'managed_web_mixed_batch_repeated',
+    'The model repeatedly mixed proxy-managed web tooling with client-executed tools in one parallel batch.',
+    {},
+    stats,
+    { 'x-vllm-proxy-managed-web-mixed-batch-repeated': 'true' },
+  );
+}
+
+function managedHostedToolEscapeResponse(stats) {
+  return managedFailureResponse(
+    'managed_hosted_tool_escape',
+    'A proxy-managed hosted web_search tool call could not be safely consumed and was blocked from escaping to the client.',
+    { kind: 'search' },
+    stats,
+    { 'x-vllm-proxy-managed-hosted-tool-escape': 'true' },
+  );
 }
 
 function toolBlocks(result) {
@@ -245,16 +278,52 @@ function managedCallKind(call, config) {
   return null;
 }
 
-function managedToolBatch(result, config) {
+function normalizeManagedToolStopReason(result) {
+  if (!result || toolBlocks(result).length === 0 || result.stopReason === 'tool_use') return result;
+  if (result.stopReason !== 'end_turn') return result;
+  return { ...result, stopReason: 'tool_use' };
+}
+
+function managedToolPartition(result, config) {
   if (result?.stopReason !== 'tool_use') return null;
   const blocks = Array.isArray(result?.blocks) ? result.blocks : [];
   if (blocks.some((block) => !['thinking', 'text', 'tool_use'].includes(block.type))) return null;
   const calls = toolBlocks(result);
   if (calls.length === 0) return null;
-  const kinds = calls.map((call) => managedCallKind(call, config));
-  if (kinds.some((kind) => !kind)) return null;
-  if (new Set(kinds).size !== 1) return null;
-  return { kind: kinds[0], calls };
+  const entries = calls.map((call) => ({ call, kind: managedCallKind(call, config) }));
+  const managedEntries = entries.filter((entry) => entry.kind);
+  if (managedEntries.length === 0) return null;
+  const primaryKind = managedEntries[0].kind;
+  const selected = managedEntries.filter((entry) => entry.kind === primaryKind).map((entry) => entry.call);
+  const deferred = entries.filter((entry) => entry.kind !== primaryKind).map((entry) => entry.call);
+  return {
+    kind: primaryKind,
+    calls: selected,
+    deferredCalls: deferred,
+    mixed: deferred.length > 0,
+  };
+}
+
+function managedToolBatch(result, config) {
+  const partition = managedToolPartition(result, config);
+  return partition && !partition.mixed ? partition : null;
+}
+
+function managedResultSubset(result, calls, deferredCount = 0) {
+  const ids = new Set(calls.map((call) => call.id));
+  const blocks = (result?.blocks || []).filter((block) => block.type !== 'tool_use' || ids.has(block.id));
+  if (deferredCount > 0) {
+    blocks.unshift({
+      type: 'text',
+      text: `[Proxy managed-tool serialization: ${deferredCount} other parallel tool call(s) were deferred and not executed. Reissue them after consuming the managed web result.]`,
+    });
+  }
+  return { ...result, blocks };
+}
+
+function containsHostedManagedSearchCall(result, config) {
+  const names = toolNameSet(config, 'search');
+  return toolBlocks(result).some((call) => names.has(String(call?.name || '').toLowerCase()));
 }
 
 function assistantContent(result) {
@@ -491,7 +560,7 @@ async function classifyWebFetchRoute(fetchImpl, input, config, parentSignal, res
         redirect: 'manual',
         headers: {
           accept: 'text/html, application/xhtml+xml, text/plain;q=0.9, application/pdf;q=0.8, */*;q=0.1',
-          'user-agent': 'VLLM-PROXY-SUITE-WebFetch-Probe/0.7.13',
+          'user-agent': 'VLLM-PROXY-SUITE-WebFetch-Probe/0.7.14',
         },
       }, positiveInteger(config.webFetchProbeTimeoutMs, 5000), parentSignal, 'managed_webfetch_probe_timeout');
     } catch (error) {
@@ -923,8 +992,12 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
       searchUses: 0, searchFailures: 0, searchLimitReached: false,
       fetchUses: 0, fetchFailures: 0, fetchLimitReached: false, fetchChunks: 0,
       browserFetchUses: 0, browserFetchReroutes: 0,
+      searchLimitFinalizations: 0, fetchLimitFinalizations: 0,
+      mixedBatchDeferrals: 0,
     };
     const disabledManagedKinds = new Set();
+    const finalizedDisabledKinds = new Set();
+    let mixedBatchDeferrals = 0;
 
     while (true) {
       const upstream = await fetchImpl(url, { ...upstreamInit, body: JSON.stringify(requestBody) });
@@ -938,12 +1011,50 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
       try {
         result = parseAnthropicBody(rawBody, requestBody, config);
       } catch {
+        if (hostedSearchPolicy) return managedHostedToolEscapeResponse(stats);
         return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
       }
 
-      const managed = managedToolBatch(result, effectiveConfig);
-      if (!managed) return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
-      if (disabledManagedKinds.has(managed.kind)) return managedLimitRepeatedResponse(managed.kind, stats);
+      const normalizedResult = normalizeManagedToolStopReason(result);
+      let managed = managedToolBatch(normalizedResult, effectiveConfig);
+      let resultForAppend = normalizedResult;
+      if (!managed) {
+        const partition = managedToolPartition(normalizedResult, effectiveConfig);
+        if (partition?.mixed) {
+          if (mixedBatchDeferrals >= 1) return managedMixedBatchRepeatedResponse(stats);
+          mixedBatchDeferrals += 1;
+          stats.mixedBatchDeferrals += 1;
+          managed = partition;
+          resultForAppend = managedResultSubset(normalizedResult, partition.calls, partition.deferredCalls.length);
+        }
+      }
+      if (!managed) {
+        if (hostedSearchPolicy && containsHostedManagedSearchCall(normalizedResult, effectiveConfig)) {
+          return managedHostedToolEscapeResponse(stats);
+        }
+        return responseFromRaw(upstream, rawBody, (stats.searchUses > 0 || stats.fetchUses > 0) ? stats : null);
+      }
+      if (disabledManagedKinds.has(managed.kind)) {
+        if (finalizedDisabledKinds.has(managed.kind)) return managedLimitRepeatedResponse(managed.kind, stats);
+        finalizedDisabledKinds.add(managed.kind);
+        if (managed.kind === 'search') {
+          stats.searchLimitReached = true;
+          stats.searchLimitFinalizations += 1;
+        } else {
+          stats.fetchLimitReached = true;
+          stats.fetchLimitFinalizations += 1;
+        }
+        const label = managed.kind === 'search' ? 'WebSearch' : 'WebFetch';
+        const content = `${label} use limit is exhausted. No additional managed ${managed.kind} calls are available. Do not call ${label} again. Continue with collected evidence, answer the user, or use a different available tool.`;
+        requestBody = appendToolResults(
+          requestBody,
+          resultForAppend,
+          managed.calls.map((call) => ({ call, content, isError: true })),
+          effectiveConfig,
+        );
+        requestBody = removeManagedTools(requestBody, effectiveConfig, managed.kind);
+        continue;
+      }
       const { kind } = managed;
       const maxBatch = positiveInteger(config.managedWebToolsMaxBatch, 8);
       const calls = managed.calls.slice(0, maxBatch);
@@ -1023,7 +1134,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
           results[managed.calls.indexOf(call)] = entry;
           await emitProgress(entry);
         }
-        requestBody = appendToolResults(requestBody, result, results, effectiveConfig);
+        requestBody = appendToolResults(requestBody, resultForAppend, results, effectiveConfig);
         if (limited.length > 0 || overflow.length > 0) {
           requestBody = removeManagedTools(requestBody, effectiveConfig, 'search');
           disabledManagedKinds.add('search');
@@ -1074,7 +1185,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
         results[managed.calls.indexOf(call)] = entry;
         await emitProgress(entry);
       }
-      requestBody = appendToolResults(requestBody, result, results, effectiveConfig);
+      requestBody = appendToolResults(requestBody, resultForAppend, results, effectiveConfig);
       if (limited.length > 0 || overflow.length > 0) {
         requestBody = removeManagedTools(requestBody, effectiveConfig, 'fetch');
         disabledManagedKinds.add('fetch');

@@ -1,28 +1,27 @@
-# VLLM-PROXY-SUITE v0.7.13 Validation
+# VLLM-PROXY-SUITE v0.7.14 Validation
 
-Validation date: 2026-08-01
+Validation date: 2026-08-02
 
 ## Scope
 
-v0.7.13 adds a content-aware HTML browser provider without replacing the existing document fetch path:
+v0.7.14 hardens Managed Web Tool dispatch and post-limit behavior without changing the `awesome-web-fetch` provider contract:
 
-- `WEBFETCH_HTML_PROVIDER=awesome-web-fetch` routes HTML and unknown browser-like pages to the `awesome-web-fetch` Playwright sidecar;
-- known PDF, plain text, Markdown, JSON, XML, CSV, TSV, YAML, and log URLs bypass the sidecar and retain the existing internal downloader and parsers;
-- extensionless URLs use one bounded, SSRF-checked HEAD probe before provider selection;
-- sidecar `page_content` and metadata are normalized, including `source`, `final_url`, `title`, `content_type`, `status_code`, and `browser_rendered` plus compatible aliases;
-- a sidecar result identified as a non-HTML document may reroute Browser -> Internal exactly once;
-- Internal never falls back to Browser, sidecar failure never silently triggers a direct HTML GET, and no new model Recovery path was added;
-- the original URL and sidecar-reported final URL are validated before use;
-- the existing Chunk Reader, Document Synthesizer, bounded Tool Result, per-kind use limits, and post-limit fuse remain in place;
-- the same Compose file now includes an opt-in `awesome-web-fetch` service under the `webfetch-browser` profile.
+- complete Managed `web_search` or `WebFetch` Tool Calls are classified before delivery even when vLLM incorrectly reports `stop_reason="end_turn"`;
+- a mixed parallel batch containing Managed Web Tools and client-executed Tools is serialized once: Managed Web work executes first and deferred client Tool Calls are not executed or replayed;
+- a second mixed batch is fused as `managed_web_mixed_batch_repeated`, `retryable:false`;
+- Hosted `web_search` responses that cannot be parsed or safely consumed are fused as `managed_hosted_tool_escape` and never escape to Claude Code;
+- after a Search or Fetch kind reaches its request-local use limit, the first repeated call receives one bounded finalization continuation with an explicit error Tool Result;
+- a second post-finalization call remains fused as `managed_web_tool_limit_repeated`, `retryable:false`, with no additional model request;
+- `awesome-web-fetch` Browser execution and Browser-to-Internal reroute counters remain separate from `WEBFETCH_MAX_USES`; each WebFetch Tool Call consumes exactly one attempt from the bounded use budget;
+- HTML routing, PDF/text Internal routing, Reader/Synthesizer behavior, SSRF checks, and the Compose sidecar profile remain unchanged from v0.7.13.
 
 ## Source verification
 
-- Full test suite: 303 passed, 0 failed.
-- Focused content-router and Gateway integration tests: 8 passed, 0 failed.
+- Full test suite: 310 passed, 0 failed.
+- Focused v0.7.14 Managed Web regressions: 7 passed, 0 failed.
 - `npm run check`: passed.
-- Package validator: `valid:true`, version `0.7.13`, 91 files, 58 required files.
-- JavaScript syntax validation: 74 files passed.
+- Package validator: `valid:true`, version `0.7.14`, 92 files, 59 required files.
+- JavaScript syntax validation: 76 files passed.
 - `docker-compose.partial.yaml`: parsed successfully with services `vllm-proxy-suite`, `searxng`, and `awesome-web-fetch`.
 - Sidecar profile: `webfetch-browser`.
 
@@ -31,32 +30,40 @@ v0.7.13 adds a content-aware HTML browser provider without replacing the existin
 Automated regressions verify:
 
 ```text
-known document -> Internal only
-HTML -> sidecar only
-sidecar non-HTML metadata -> one Internal reroute
-sidecar HTTP failure -> error tool_result, no direct HTML fallback
-Internal -> Browser transition does not exist
+end_turn + complete managed Tool Call
+→ classify as tool_use before Managed dispatch
+
+Managed Web + client Tool mixed batch
+→ serialize once
+→ second mixed batch returns HTTP/SSE 422
+→ no third continuation
+
+use limit reached
+→ one finalization continuation without external fetch/search
+→ second repeated disabled Tool Call returns HTTP/SSE 422
+→ no further vLLM request
+
+malformed Hosted web_search
+→ managed_hosted_tool_escape
+→ no client-visible hosted Tool Call
 ```
 
-The integration does not add an Attempt Recovery. A model may still issue another WebFetch during the normal managed continuation, but the existing request-local `WEBFETCH_MAX_USES` limit and `managed_web_tool_limit_repeated` fuse bound that behavior.
+The bounded finalization is not the general Recovery subsystem. It is request-local Managed Web continuation state and is hard-limited to one finalization per disabled kind.
 
 ## Artifact verification
 
 The release procedure additionally verifies:
 
 ```text
-unzip -t VLLM-PROXY-SUITE-v0.7.13.zip
+unzip -t VLLM-PROXY-SUITE-v0.7.14.zip
 npm test from a clean extracted ZIP
 npm run check from a clean extracted ZIP
 source and extracted ZIP SHA-256 manifests are identical
-v0.7.12 -> v0.7.13 patch applies cleanly and produces the same manifest
+v0.7.13 -> v0.7.14 patch applies cleanly and produces the same manifest
 ```
 
 ## Not executed
 
-- A live Docker/Compose image build of the external Git context.
-- A live `awesome-web-fetch` Chromium request against public websites.
-- A real Claude Code -> Proxy -> vLLM -> awesome-web-fetch deployment integration.
+- A live Docker/Compose image build of the external `awesome-web-fetch` Git context.
+- A real Claude Code -> Proxy -> vLLM -> SearXNG/awesome-web-fetch deployment integration.
 - Production load, long-duration browser-context, or egress-policy testing.
-
-The current environment could not retrieve the repository through its web/Git network path. The adapter therefore uses the confirmed `{urls:[...]}` / `page_content` baseline and accepts the documented metadata fields plus compatible snake_case/camelCase aliases. Artifact hashes are reported with the release delivery.

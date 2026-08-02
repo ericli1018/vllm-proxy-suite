@@ -226,20 +226,24 @@ test('WebFetch revalidates every redirect and blocks a redirect to metadata addr
   assert.match(bodies[1].messages.at(-1).content[0].content, /private_address/);
 });
 
-test('mixed WebFetch and client tool response remains client-visible and performs no document fetch', async () => {
+test('mixed WebFetch and client tool response is serialized once and repeated mixing is fused', async () => {
   let calls = 0;
   const wrapped = createAnthropicManagedWebToolsFetch(async () => {
     calls += 1;
     return sseResponse([
-      { type: 'tool_use', id: 'wf1', name: 'WebFetch', input: { url: 'https://example.com', prompt: 'read' } },
-      { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'pwd' } },
+      { type: 'tool_use', id: `wf${calls}`, name: 'WebFetch', input: {} },
+      { type: 'tool_use', id: `b${calls}`, name: 'Bash', input: { command: 'pwd' } },
     ], 'tool_use');
   }, config(), { resolveHost: async () => ['1.1.1.1'] });
-  const final = await wrapped('http://vllm:8001/v1/messages', { method: 'POST', body: JSON.stringify({ model: 'm', stream: true, messages: [] }) });
-  const text = await final.text();
-  assert.equal(calls, 1);
-  assert.match(text, /"name":"WebFetch"/);
-  assert.match(text, /"name":"Bash"/);
+  const final = await wrapped('http://vllm:8001/v1/messages', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'm', stream: true, messages: [], tools: [{ name: 'WebFetch' }, { name: 'Bash' }] }),
+  });
+  const payload = await final.json();
+  assert.equal(final.status, 422);
+  assert.equal(payload.error.type, 'managed_web_mixed_batch_repeated');
+  assert.equal(payload.error.retryable, false);
+  assert.equal(calls, 2);
 });
 
 test('PDF extraction ignores trailing empty form-feed pages', async () => {

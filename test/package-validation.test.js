@@ -15,7 +15,7 @@ test('package validator confirms required deployable artifacts', () => {
   const report = JSON.parse(result.stdout);
   assert.equal(report.valid, true);
   assert.equal(report.project, 'VLLM-PROXY-SUITE');
-  assert.equal(report.version, '0.7.13');
+  assert.equal(report.version, '0.7.14');
   assert.equal(report.architecture, 'single-process-javascript-gateway');
   assert.equal(report.repository, 'https://github.com/ericli1018/vllm-proxy-suite.git');
   assert.ok(report.files >= 20);
@@ -67,6 +67,9 @@ test('README documents native path routing and separate protocol keys', () => {
   assert.match(readme, /web_search_20250305/);
   assert.match(readme, /anthropic_hosted_web_search_adapted/);
   assert.match(readme, /managed_web_tool_limit_repeated/);
+  assert.match(readme, /managed_web_mixed_batch_repeated/);
+  assert.match(readme, /managed_hosted_tool_escape/);
+  assert.match(readme, /bounded finalization continuation/i);
   assert.match(readme, /WEBFETCH_HTML_PROVIDER/);
   assert.match(readme, /awesome-web-fetch/);
   assert.match(readme, /Browser.*Internal.*一次|Browser.*Internal.*one/is);

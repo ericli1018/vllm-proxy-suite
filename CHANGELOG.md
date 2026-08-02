@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.14 - 2026-08-02
+
+- Moved Managed Web Tool stop-reason normalization ahead of Managed Tool classification, so a complete `web_search` or `WebFetch` Tool Call that incorrectly ends with `end_turn` is still consumed internally instead of being replayed to Claude Code.
+- Added one-shot serialization for mixed parallel batches containing a Proxy-managed Web Tool plus client-executed Tools such as `TaskUpdate` or `Bash`. Managed work executes first; deferred client calls are not executed and must be reissued. A second mixed batch is fused as `managed_web_mixed_batch_repeated`, `retryable:false`.
+- Added `managed_hosted_tool_escape` fail-closed protection. Hosted `web_search` responses that cannot be safely parsed or managed are blocked locally and can no longer escape back to Claude Code.
+- Replaced the immediate post-limit API failure with one bounded finalization continuation. The first call to a disabled Search or Fetch kind receives an explicit error Tool Result instructing the model to continue with collected evidence; a second post-finalization call still fuses as `managed_web_tool_limit_repeated` with no further model request.
+- Added runtime observability for Managed Web limit finalizations and mixed-batch serialization, plus focused unit and full-runtime regressions. `awesome-web-fetch` execution and Browser-to-Internal reroute accounting remain independent from `WEBFETCH_MAX_USES`.
+
 ## 0.7.13 - 2026-08-01
 
 - Added a content-aware Managed WebFetch provider router. HTML and unknown browser-like pages can use the opt-in `awesome-web-fetch` Playwright sidecar, while PDF, plain text, Markdown, JSON, XML, CSV, TSV, YAML, and log documents retain the existing internal downloader and parsers.

@@ -121,22 +121,28 @@ test('managed WebSearch executes SearXNG and continues Anthropic messages intern
   assert.match(toolResult.content, /docs\.vllm\.ai/);
 });
 
-test('mixed WebSearch and client tool response is passed through without SearXNG execution', async () => {
-  let calls = 0;
-  const fetchImpl = async () => {
-    calls += 1;
+test('mixed WebSearch and client tool response is serialized once and repeated mixing is fused', async () => {
+  let upstreamCalls = 0;
+  let searxngCalls = 0;
+  const fetchImpl = async (url) => {
+    if (String(url).startsWith('http://searxng:8080/')) {
+      searxngCalls += 1;
+      return response(JSON.stringify({ results: [{ title: 'R', url: 'https://example.com/r', content: 'evidence' }] }), 'application/json');
+    }
+    upstreamCalls += 1;
     return response(anthropicSse([
-      { type: 'tool_use', id: 's1', name: 'WebSearch', input: { query: 'x' } },
-      { type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'pwd' } },
+      { type: 'tool_use', id: `s${upstreamCalls}`, name: 'WebSearch', input: { query: 'x' } },
+      { type: 'tool_use', id: `b${upstreamCalls}`, name: 'Bash', input: { command: 'pwd' } },
     ], 'tool_use'));
   };
   const wrapped = createAnthropicManagedWebSearchFetch(fetchImpl, config());
-  const final = await wrapped('http://vllm:8001/v1/messages', { method: 'POST', body: JSON.stringify({ stream: true, messages: [] }) });
-  const text = await final.text();
-  assert.equal(calls, 1);
-  assert.match(text, /"name":"WebSearch"/);
-  assert.match(text, /"name":"Bash"/);
-  assert.equal(final.headers.get('x-vllm-proxy-managed-websearch-uses'), null);
+  const final = await wrapped('http://vllm:8001/v1/messages', { method: 'POST', body: JSON.stringify({ stream: true, messages: [], tools: [{ name: 'WebSearch' }, { name: 'Bash' }] }) });
+  const payload = await final.json();
+  assert.equal(final.status, 422);
+  assert.equal(payload.error.type, 'managed_web_mixed_batch_repeated');
+  assert.equal(payload.error.retryable, false);
+  assert.equal(upstreamCalls, 2);
+  assert.equal(searxngCalls, 1);
 });
 
 test('SearXNG failure becomes an error tool_result and the model can continue', async () => {

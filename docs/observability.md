@@ -754,7 +754,15 @@ managed=true
 
 The hosted-only configuration is consumed before the first vLLM request. Query text, domain lists, and result payloads are not logged by this event.
 
-If a Managed Search or Fetch kind has already reached its limit and the model calls that removed kind again, the route preserves the following non-retryable failure. It uses HTTP `422` when headers are not committed, or an equivalent SSE `event:error` when managed progress has already started:
+When a Managed Search or Fetch kind reaches its limit, the first subsequent call to that removed kind receives one bounded finalization continuation. No external Search or Fetch is executed; the Proxy appends an `is_error:true` Tool Result instructing the model to use collected evidence and stop calling that Tool. Completion is observable through:
+
+```text
+event=managed_web_limit_finalization_completed
+searchFinalizations=<count>
+fetchFinalizations=<count>
+```
+
+If the model calls the same disabled kind again after that single finalization, the route preserves the following non-retryable failure. It uses HTTP `422` when headers are not committed, or an equivalent SSE `event:error` when managed progress has already started:
 
 ```text
 type=managed_web_tool_limit_repeated
@@ -762,7 +770,16 @@ retryable=false
 kind="search" | "fetch"
 ```
 
-This is a local no-loop fuse: no additional vLLM request is issued and no Tool Call is replayed to Claude Code. The runtime also emits `event=client_retry_suppressed` with `reason=managed_web_tool_limit_repeated`.
+No further vLLM request is issued after this fuse and no Tool Call is replayed to Claude Code. The runtime also emits `event=client_retry_suppressed` with `reason=managed_web_tool_limit_repeated`.
+
+A mixed parallel batch containing Managed Web Tools and client-executed Tools is serialized once. The runtime emits:
+
+```text
+event=managed_web_mixed_batch_serialized
+deferrals=1
+```
+
+A second mixed batch is fused as `managed_web_mixed_batch_repeated`, `retryable:false`. A Hosted `web_search` response that cannot be parsed or consumed is fused as `managed_hosted_tool_escape`, preventing the Tool Call from escaping to Claude Code.
 
 ## Claude Code Managed WebSearch
 
@@ -801,6 +818,9 @@ vllm_cc_proxy_managed_web_fetch_limits_total
 vllm_cc_proxy_managed_web_fetch_chunks_total
 vllm_cc_proxy_awesome_web_fetch_executions_total
 vllm_cc_proxy_awesome_web_fetch_reroutes_total
+vllm_cc_proxy_managed_web_limit_finalizations_total
+vllm_cc_proxy_managed_web_mixed_batch_deferrals_total
+vllm_cc_proxy_managed_hosted_tool_escapes_total
 ```
 
 Managed tool calls are server-side internal operations, so Claude Code does not display `Search(...)` or `WebFetch(...)`. The final response or next ordinary Claude Code Tool Call is replayed after the internal loop completes.

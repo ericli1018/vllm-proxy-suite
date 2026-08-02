@@ -5,6 +5,7 @@ import { once } from 'node:events';
 
 import {
   buildAnthropicActionRequiredRecovery,
+  buildAnthropicOutputRequiredRecovery,
   detectAnthropicActionIntentWithoutToolCall,
   summarizeAnthropicExecutionContext,
   summarizeAnthropicToolContext,
@@ -226,7 +227,12 @@ test('Anthropic action-intent guard ignores plans, final answers, tool responses
 });
 
 test('Anthropic action-required recovery preserves tools and forces one immediate tool path', () => {
-  const original = baseRequest();
+  const original = {
+    ...baseRequest(),
+    thinking: { type: 'enabled', budget_tokens: 1024 },
+    think: true,
+    chat_template_kwargs: { custom: true, enable_thinking: true },
+  };
   const issue = detectAnthropicActionIntentWithoutToolCall({
     requestBody: original,
     output: output('好的，我開始執行。'),
@@ -242,10 +248,68 @@ test('Anthropic action-required recovery preserves tools and forces one immediat
   assert.equal(recovery.plan.mode, 'action_required');
   assert.deepEqual(recovery.body.tools, tools);
   assert.deepEqual(recovery.body.tool_choice, { type: 'any', disable_parallel_tool_use: true });
+  assert.equal('thinking' in recovery.body, false);
+  assert.equal(recovery.body.think, false);
+  assert.deepEqual(recovery.body.chat_template_kwargs, { custom: true, enable_thinking: false });
   assert.match(recovery.body.system, /described an immediate action but ended without a tool call/i);
   assert.match(recovery.body.system, /Produce at least one tool call now/i);
   assert.equal(recovery.diagnostics.recoveryMode, 'action_required');
   assert.equal(recovery.diagnostics.recoveryToolCount, 2);
+  assert.equal(recovery.diagnostics.recoveryThinkingDisabled, true);
+});
+
+test('Anthropic output-required recovery disables thinking while preserving auto tool choice', () => {
+  const original = {
+    ...baseRequest(),
+    thinking: { type: 'enabled', budget_tokens: 1024 },
+    think: true,
+    chat_template_kwargs: { custom: true, enable_thinking: true },
+  };
+  const recovery = buildAnthropicOutputRequiredRecovery({
+    original,
+    prepared: original,
+    issue: { ok: false, reason: 'thinking_without_output' },
+    config: configFor('http://127.0.0.1:1'),
+  });
+
+  assert.equal(recovery.plan.mode, 'output_required');
+  assert.deepEqual(recovery.body.tool_choice, { type: 'auto' });
+  assert.equal('thinking' in recovery.body, false);
+  assert.equal(recovery.body.think, false);
+  assert.deepEqual(recovery.body.chat_template_kwargs, { custom: true, enable_thinking: false });
+  assert.equal(recovery.diagnostics.recoveryThinkingDisabled, true);
+});
+
+test('Anthropic Recovery no-think policy permits explicit per-mode opt-out', () => {
+  const original = {
+    ...baseRequest(),
+    thinking: { type: 'enabled', budget_tokens: 1024 },
+    think: true,
+    chat_template_kwargs: { enable_thinking: true },
+  };
+  const config = configFor('http://127.0.0.1:1', {
+    outputRequiredRecoveryDisableThinking: false,
+    actionRequiredRecoveryDisableThinking: false,
+  });
+  const outputRecovery = buildAnthropicOutputRequiredRecovery({
+    original,
+    prepared: original,
+    issue: { ok: false, reason: 'thinking_without_output' },
+    config,
+  });
+  const actionRecovery = buildAnthropicActionRequiredRecovery({
+    original,
+    prepared: original,
+    issue: { ok: false, reason: 'action_intent_without_tool_call' },
+    config,
+  });
+
+  for (const recovery of [outputRecovery, actionRecovery]) {
+    assert.deepEqual(recovery.body.thinking, original.thinking);
+    assert.equal(recovery.body.think, true);
+    assert.equal(recovery.body.chat_template_kwargs.enable_thinking, true);
+    assert.equal(recovery.diagnostics.recoveryThinkingDisabled, false);
+  }
 });
 
 test('Anthropic action-required recovery validation fails closed without a Tool Call', () => {
@@ -292,14 +356,18 @@ test('Claude Code runtime discards narration and replays only the recovered Tool
   assert.equal(attempts, 2);
   assert.doesNotMatch(text, /我開始執行階段/);
   assert.match(text, /"name":"Bash"/);
+  assert.equal(received[0].chat_template_kwargs.enable_thinking, true);
   assert.deepEqual(received[1].tools, tools);
   assert.deepEqual(received[1].tool_choice, { type: 'any', disable_parallel_tool_use: true });
+  assert.equal(received[1].think, false);
+  assert.equal(received[1].chat_template_kwargs.enable_thinking, false);
   assert.ok(logs.some((row) => row.event === 'request_tool_context'
     && row.incomingToolCount === 2
     && row.upstreamToolCount === 2));
   assert.ok(logs.some((row) => row.event === 'action_intent_without_tool_call_detected'));
   assert.ok(logs.some((row) => row.event === 'recovery_request_built'
-    && row.recoveryMode === 'action_required'));
+    && row.recoveryMode === 'action_required'
+    && row.recoveryThinkingDisabled === true));
   assert.equal(runtime.metrics.actionIntentWithoutToolCallDetectedTotal, 1);
   assert.equal(runtime.metrics.actionIntentRecoveriesFusedTotal, 0);
 });
@@ -448,13 +516,17 @@ test('Claude Code thinking-only Recovery keeps auto tool choice and may answer t
 
   assert.equal(attempts, 2);
   assert.equal(response.status, 200);
+  assert.equal(received[0].chat_template_kwargs.enable_thinking, true);
   assert.deepEqual(received[1].tools, tools);
   assert.deepEqual(received[1].tool_choice, { type: 'auto' });
+  assert.equal(received[1].think, false);
+  assert.equal(received[1].chat_template_kwargs.enable_thinking, false);
   assert.match(text, /規劃已完成/);
   assert.ok(logs.some((row) => row.event === 'recovery_request_built'
     && row.recoveryMode === 'output_required'
     && row.recoveryOriginReason === 'thinking_without_output'
-    && row.forcedToolChoice === false));
+    && row.forcedToolChoice === false
+    && row.recoveryThinkingDisabled === true));
   assert.equal(runtime.metrics.thinkingWithoutOutputRecoveriesFusedTotal, 0);
 });
 

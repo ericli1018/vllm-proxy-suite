@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.16 - 2026-08-02
+
+- Disabled model Thinking only for the single bounded Anthropic `output_required` and `action_required` Recovery requests by setting both `think:false` and `chat_template_kwargs.enable_thinking:false`.
+- Preserved the original Thinking policy for normal initial requests and for unrelated Claude Code file/schema Recovery modes.
+- Kept Output-Required Recovery tool choice unchanged (`auto` remains `auto`) and kept Action-Required Recovery forced to one immediate Tool path.
+- Added independent opt-out settings: `CLAUDE_CODE_OUTPUT_REQUIRED_RECOVERY_DISABLE_THINKING` and `CLAUDE_CODE_ACTION_REQUIRED_RECOVERY_DISABLE_THINKING`, both defaulting to `true`.
+- Added unit and full-runtime regressions proving that Recovery is No-Think, successful visible text or Tool Calls are delivered, a second empty result still fuses as HTTP `422`, and no third upstream Attempt is created.
+
 ## 0.7.15 - 2026-08-02
 
 - Classified Claude Code mutation Tool failures into resolvable `read_precondition` failures and persistent deterministic failures.

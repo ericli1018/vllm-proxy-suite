@@ -672,6 +672,7 @@ Let me test the TLS server now.
 ```text
 保留原 tools[]
 tool_choice={type:"any",disable_parallel_tool_use:true}
+Recovery request 設定 think=false 與 chat_template_kwargs.enable_thinking=false
 要求立即產生 Tool Call
 禁止再次只輸出進度宣告
 ```
@@ -691,11 +692,12 @@ Action-Required Recovery 最多只執行一次。第二次仍未產生有效 Too
 ```text
 保留原 tools[]
 保留原 tool_choice；auto 仍為 auto
+Recovery request 設定 think=false 與 chat_template_kwargs.enable_thinking=false
 允許正常回答、解釋、規劃、完成報告、等待確認、必要提問或 Tool Call
 禁止再次只輸出 Thinking
 ```
 
-因此短指令 `繼續`、`開始`、`proceed` 或 `go ahead` 不會再單獨觸發強制 Tool Call。若第二次仍只有 Thinking，Proxy 保留 `reason="thinking_without_output"` 並回傳 `retryable=false`，避免 Claude Code 反覆重送；若 Recovery 產生有效可見文字，則正常交付給使用者。一般規劃、步驟說明、完成報告與等待使用者確認均屬合法文字輸出。可用 `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED=false` 停用 Action-Intent Guard；Output-Required Recovery 仍屬通用輸出完整性處理。
+正常初始請求仍保留原本 Thinking 設定；只有要求立即產生可見輸出或 Tool Call 的唯一一次 Output／Action Recovery 預設關閉 Thinking，避免 Recovery 再次只產生 hidden reasoning 後 `end_turn`。因此短指令 `繼續`、`開始`、`proceed` 或 `go ahead` 不會再單獨觸發強制 Tool Call。若 No-Think Recovery 仍沒有可見輸出或 Tool Call，Proxy 保留原原因並回傳 HTTP `422`、`retryable=false`，且不進行第三次上游請求。一般規劃、步驟說明、完成報告與等待使用者確認均屬合法文字輸出。可用 `CLAUDE_CODE_ACTION_INTENT_GUARD_ENABLED=false` 停用 Action-Intent Guard；Output-Required Recovery 仍屬通用輸出完整性處理。
 
 當最新輸入是 Claude Code `tool_result`，而模型只輸出精確佔位文字 `No response`、`No output`、`無回應`、`沒有回應`、`無輸出` 或 `沒有輸出` 並以 `end_turn` 結束時，Proxy 將其分類為 `placeholder_completion_without_progress`。完整句子（例如 `No response was received from the server.`）、一般短回答及非 Tool Result 回合不會命中。
 
@@ -913,6 +915,8 @@ targetless_tool_recovery_fused
 | `CLAUDE_CODE_WRITE_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED` | `true` |
 | `CLAUDE_CODE_BASH_INVALIDATES_READS` | `true` |
+| `CLAUDE_CODE_OUTPUT_REQUIRED_RECOVERY_DISABLE_THINKING` | `true`；僅在 Output-Required Recovery 設定 `think=false` 與 `enable_thinking=false` |
+| `CLAUDE_CODE_ACTION_REQUIRED_RECOVERY_DISABLE_THINKING` | `true`；僅在 Action-Required Recovery 設定 `think=false` 與 `enable_thinking=false` |
 
 ## Health 與 Metrics
 

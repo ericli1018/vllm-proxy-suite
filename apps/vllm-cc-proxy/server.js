@@ -61,6 +61,16 @@ export function loadAnthropicConfig(env = process.env) {
     claudeCodeWriteRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_WRITE_RECOVERY_ENABLED, true),
     claudeCodeNotebookEditRecoveryEnabled: parseBoolean(env.CLAUDE_CODE_NOTEBOOK_EDIT_RECOVERY_ENABLED, true),
     claudeCodeBashInvalidatesReads: parseBoolean(env.CLAUDE_CODE_BASH_INVALIDATES_READS, true),
+    outputRequiredRecoveryDisableThinking: parseBoolean(
+      env.CLAUDE_CODE_OUTPUT_REQUIRED_RECOVERY_DISABLE_THINKING
+        ?? env.OUTPUT_REQUIRED_RECOVERY_DISABLE_THINKING,
+      true,
+    ),
+    actionRequiredRecoveryDisableThinking: parseBoolean(
+      env.CLAUDE_CODE_ACTION_REQUIRED_RECOVERY_DISABLE_THINKING
+        ?? env.ACTION_REQUIRED_RECOVERY_DISABLE_THINKING,
+      true,
+    ),
     managedWebSearchEnabled: parseBoolean(env.CLAUDE_CODE_WEBSEARCH_BRIDGE_ENABLED, false),
     managedWebSearchToolNames: parseCsv(env.CLAUDE_CODE_WEBSEARCH_TOOL_NAMES || 'WebSearch'),
     managedWebFetchEnabled: parseBoolean(env.CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED, false),

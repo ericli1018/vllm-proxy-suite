@@ -156,6 +156,17 @@ function capRecoverySampling(body, config) {
   );
 }
 
+function applyRecoveryThinkingPolicy(body, disabled) {
+  if (disabled === false) return false;
+  const existing = body.chat_template_kwargs && typeof body.chat_template_kwargs === 'object' && !Array.isArray(body.chat_template_kwargs)
+    ? structuredClone(body.chat_template_kwargs)
+    : {};
+  delete body.thinking;
+  body.think = false;
+  body.chat_template_kwargs = { ...existing, enable_thinking: false };
+  return true;
+}
+
 function recoveryInstruction(issue) {
   const previousFailure = issue.reason === 'thinking_without_output'
     ? 'The previous response ended after reasoning without visible output or a tool call.'
@@ -223,6 +234,10 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
 
   const body = structuredClone(prepared || original);
   capRecoverySampling(body, config);
+  const recoveryThinkingDisabled = applyRecoveryThinkingPolicy(
+    body,
+    config?.outputRequiredRecoveryDisableThinking,
+  );
   body.system = appendSystem(body.system, outputRecoveryInstruction(issue));
 
   const toolContext = summarizeAnthropicToolContext(body);
@@ -251,6 +266,7 @@ export function buildAnthropicOutputRequiredRecovery({ original, prepared = null
       parallelToolCallsDisabled: toolContext.parallelToolCallsDisabled,
       targetlessToolRecovery: plan.targetlessToolRecovery,
       toolInputSchemaRecovery: plan.toolInputSchemaRecovery,
+      recoveryThinkingDisabled,
       ...((plan.targetlessToolRecovery || plan.toolInputSchemaRecovery) ? { rejectedToolName: plan.rejectedToolName } : {}),
     },
   };
@@ -295,6 +311,10 @@ export function buildAnthropicActionRequiredRecovery({ original, prepared = null
 
   const body = structuredClone(prepared || original);
   capRecoverySampling(body, config);
+  const recoveryThinkingDisabled = applyRecoveryThinkingPolicy(
+    body,
+    config?.actionRequiredRecoveryDisableThinking,
+  );
   body.tools = structuredClone(original.tools);
   body.tool_choice = { type: 'any', disable_parallel_tool_use: true };
   body.system = appendSystem(body.system, recoveryInstruction(issue));
@@ -315,6 +335,7 @@ export function buildAnthropicActionRequiredRecovery({ original, prepared = null
       recoveryToolNames: [...plan.candidateNames],
       forcedToolChoice: 'any',
       parallelToolCallsDisabled: true,
+      recoveryThinkingDisabled,
     },
   };
 }

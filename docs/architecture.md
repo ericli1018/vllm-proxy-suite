@@ -160,3 +160,17 @@ Hosted-only fields are consumed before the first vLLM request. The request-local
 The bridge does not change the shared protocol runtime. Anthropic responses are already buffered before replay, so the bridge can hide the managed Tool Call without crossing an irreversible client-delivery boundary. Responses containing mixed Managed/Client tools, malformed tool input, unknown content blocks, or a non-`tool_use` stop reason are returned untouched.
 
 Search and Fetch limits are request-local and per kind. Reaching one limit removes only that tool kind. A repeated call to a kind already removed for limit exhaustion is fused locally with HTTP 422 and no additional model generation.
+
+## Content-aware WebFetch provider routing
+
+Managed WebFetch keeps one Tool contract and one Reader/Synthesizer continuation, but selects the acquisition provider before extraction:
+
+```text
+known document extension → Internal Fetch
+extensionless URL → one SSRF-checked HEAD probe
+HTML / unknown / probe rejection → awesome-web-fetch when configured
+PDF / text / structured document → Internal Fetch
+sidecar non-HTML metadata → one Browser-to-Internal reroute
+```
+
+The state transition is one-way. Internal Fetch never falls back to the browser provider, a sidecar HTTP failure becomes one error Tool Result, and no model Recovery is added. Sidecar `final_url` is revalidated before use. The browser service is an opt-in Compose sidecar under the `webfetch-browser` profile; `WEBFETCH_HTML_PROVIDER=internal` remains the default.

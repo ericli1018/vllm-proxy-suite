@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.13 - 2026-08-01
+
+- Added a content-aware Managed WebFetch provider router. HTML and unknown browser-like pages can use the opt-in `awesome-web-fetch` Playwright sidecar, while PDF, plain text, Markdown, JSON, XML, CSV, TSV, YAML, and log documents retain the existing internal downloader and parsers.
+- Added conservative routing: known document extensions bypass the sidecar; extensionless URLs use one bounded, SSRF-checked HEAD probe; probe failures and HTML responses route to the browser sidecar.
+- Added tolerant consumption of `awesome-web-fetch` metadata including `source`, `final_url`, `title`, `content_type`, `status_code`, and `browser_rendered`, while preserving the existing Chunk Reader, Document Synthesizer, bounded Tool Result, and internal continuation.
+- Added a one-way Browser-to-Internal reroute when sidecar metadata identifies a non-HTML document. The reroute occurs at most once, Internal never falls back to Browser, and sidecar failure never silently triggers a direct HTML GET.
+- Added final-URL SSRF validation, bounded sidecar response parsing, API-key authentication, provider metrics, and an opt-in `awesome-web-fetch` service in the same Compose file under the `webfetch-browser` profile.
+- Added focused unit and Gateway integration regressions covering HTML, PDF, plain text, one-way reroute, no-fallback failure handling, metrics, package validation, and documentation.
+
 ## 0.7.12 - 2026-08-01
 
 - Added an Anthropic Hosted Web Search compatibility adapter for Claude Code child requests that carry `type="web_search_20250305"`, `name="web_search"`, and no `input_schema`.

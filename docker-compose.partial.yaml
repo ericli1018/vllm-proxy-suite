@@ -77,6 +77,13 @@ services:
       SEARXNG_LANGUAGE: "${SEARXNG_LANGUAGE:-all}"
       SEARXNG_CATEGORIES: "${SEARXNG_CATEGORIES:-general}"
       SEARXNG_SAFE_SEARCH: "${SEARXNG_SAFE_SEARCH:-0}"
+      WEBFETCH_HTML_PROVIDER: "${WEBFETCH_HTML_PROVIDER:-internal}"
+      WEBFETCH_PROBE_TIMEOUT_MS: "${WEBFETCH_PROBE_TIMEOUT_MS:-5000}"
+      AWESOME_WEB_FETCH_BASE_URL: "${AWESOME_WEB_FETCH_BASE_URL:-http://awesome-web-fetch:3000}"
+      AWESOME_WEB_FETCH_PATH: "${AWESOME_WEB_FETCH_PATH:-/}"
+      AWESOME_WEB_FETCH_API_KEY: "${AWESOME_WEB_FETCH_API_KEY:-replace-with-a-long-random-sidecar-key}"
+      AWESOME_WEB_FETCH_TIMEOUT_MS: "${AWESOME_WEB_FETCH_TIMEOUT_MS:-90000}"
+      AWESOME_WEB_FETCH_MAX_RESPONSE_BYTES: "${AWESOME_WEB_FETCH_MAX_RESPONSE_BYTES:-8388608}"
       WEBFETCH_TIMEOUT_MS: "${WEBFETCH_TIMEOUT_MS:-20000}"
       WEBFETCH_MAX_USES: "${WEBFETCH_MAX_USES:-3}"
       WEBFETCH_MAX_REDIRECTS: "${WEBFETCH_MAX_REDIRECTS:-5}"
@@ -220,6 +227,42 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    networks:
+      - vllm-test-network
+  awesome-web-fetch:
+    build:
+      context: "${AWESOME_WEB_FETCH_BUILD_CONTEXT:-https://github.com/ericli1018/awesome-web-fetch.git#main}"
+    image: "${AWESOME_WEB_FETCH_IMAGE:-awesome-web-fetch:local}"
+    container_name: awesome-web-fetch
+    profiles:
+      - webfetch-browser
+    init: true
+    restart: unless-stopped
+    expose:
+      - "3000"
+    shm_size: "1gb"
+    environment:
+      NODE_ENV: "production"
+      PORT: "3000"
+      API_KEY: "${AWESOME_WEB_FETCH_API_KEY:-replace-with-a-long-random-sidecar-key}"
+      BATCH_SIZE: "${AWESOME_WEB_FETCH_BATCH_SIZE:-3}"
+      MAX_CHARS: "${AWESOME_WEB_FETCH_MAX_CHARS:-2000000}"
+      GOTO_TIMEOUT: "${AWESOME_WEB_FETCH_GOTO_TIMEOUT:-20000}"
+      WAIT_TIMEOUT: "${AWESOME_WEB_FETCH_WAIT_TIMEOUT:-5000}"
+      FETCH_TIMEOUT: "${AWESOME_WEB_FETCH_FETCH_TIMEOUT:-30000}"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000/')
+          .then((response)=>process.exit(response.ok?0:1))
+          .catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
     networks:
       - vllm-test-network
 

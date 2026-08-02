@@ -48,3 +48,7 @@ Think Loop detection remains heuristic before an action boundary. The default re
 - The synthetic `message_start` is emitted before upstream token usage is known, so downstream `usage.input_tokens` is reported as `0`; Proxy completion logs and internal metrics still retain the actual upstream usage reported by vLLM.
 - The implementation returns its own bounded evidence schema and does not emulate Anthropic hosted-tool encrypted content or native citations.
 - URL hostnames are resolved and checked before each request/redirect, but the current fetch transport does not pin the validated IP; environments requiring DNS-rebinding resistance should place the Proxy behind an egress firewall or outbound HTTP proxy.
+
+## Browser sidecar redirect enforcement
+
+When `WEBFETCH_HTML_PROVIDER=awesome-web-fetch`, the Proxy validates the original URL before the sidecar call and validates returned `final_url` before using it. The browser navigation itself occurs inside the sidecar, so redirect-by-redirect DNS/IP enforcement must also be implemented by `awesome-web-fetch` or the deployment egress policy. The Proxy cannot retroactively prevent a sidecar from contacting a private redirect target.

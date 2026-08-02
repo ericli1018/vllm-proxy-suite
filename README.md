@@ -219,10 +219,11 @@ WebSearch
 → 內部 vLLM continuation
 
 WebFetch(url, prompt)
-→ 每次 redirect 重新做 SSRF／DNS 驗證
-→ 有界下載 HTML／text／PDF
-→ HTML 依結構與字元預算分段
-→ PDF 使用 pdftotext 保留 page break，再依頁組分段
+→ Content-Aware Router：已知文件副檔名直接 Internal；其他 URL 做一次有界 HEAD Probe
+→ HTML／未知 Browser Page：awesome-web-fetch Playwright sidecar
+→ PDF／plain text／Markdown／JSON／XML／CSV／TSV／YAML：原有 Internal Fetch
+→ sidecar metadata 若判定為非 HTML，只允許 Browser → Internal 回切一次
+→ HTML／Text 依字元預算分段；PDF 使用 pdftotext 保留 page break
 → 每段送至 vLLM Chunk Reader 擷取相關事實
 → Document Synthesizer 合併證據
 → 精簡 managed_webfetch_result 回灌主模型
@@ -277,15 +278,27 @@ export CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED=true
 docker compose up -d vllm-proxy-suite
 ```
 
+若 HTML 頁面要改由 `awesome-web-fetch` 模擬瀏覽器讀取，啟用同一份 Compose 的 sidecar profile：
+
+```bash
+export CLAUDE_CODE_WEBFETCH_BRIDGE_ENABLED=true
+export WEBFETCH_HTML_PROVIDER=awesome-web-fetch
+export AWESOME_WEB_FETCH_API_KEY='replace-with-a-long-random-sidecar-key'
+
+docker compose --profile webfetch-browser up -d --build awesome-web-fetch vllm-proxy-suite
+```
+
+`WEBFETCH_HTML_PROVIDER` 預設為 `internal`，因此升級不會自動改變既有 Fetch 行為。Browser Sidecar 只負責 HTML／JavaScript 頁面；PDF 與文字／結構化文件仍使用 Proxy 原有抓取與解析路徑。
+
 WebFetch 需要 `url` 與 `prompt`。模型若產生空 `{}` 或缺少欄位，Proxy 會在內部建立 `is_error:true` tool_result，讓模型自行重試或降級，不再把無效 WebFetch 交給 Claude Code。
 
 支援內容：
 
-- `text/html`
-- `text/plain`
-- `application/pdf`
+- HTML／XHTML：`WEBFETCH_HTML_PROVIDER=awesome-web-fetch` 時使用 Playwright Sidecar；否則使用 Internal Fetch。
+- Plain text、Markdown、JSON、XML、CSV、TSV、YAML 與 log：使用 Internal Fetch。
+- PDF：使用 Internal Fetch 與 `pdftotext -layout`，保留 form-feed page boundary。
 
-Dockerfile 與 Compose runtime 會安裝 `poppler-utils`，PDF 由 `pdftotext -layout` 抽取並保留 form-feed page boundary。JavaScript-heavy、需要登入、CAPTCHA 或瀏覽器渲染的頁面不在第一版支援範圍。
+Sidecar 回應使用 `page_content` 與 metadata。Proxy 會讀取 `source`、`final_url`、`title`、`content_type`、`status_code`、`browser_rendered`；額外 metadata 保留為不受信任的 provider 資料，不直接寫入主模型結果。Sidecar metadata 若指出 PDF／文字文件，Proxy 只允許一次 Browser → Internal reroute。Internal 路徑不會再回到 Browser，Sidecar HTTP 失敗也不會改用 Direct HTML GET。
 
 安全限制包括：
 
@@ -845,7 +858,16 @@ targetless_tool_recovery_fused
 | `MANAGED_WEB_STREAM_PROGRESS_MAX_DOTS` | `12`；每行省略號數量，達上限後換行繼續 |
 | `WEBSEARCH_MAX_PARALLEL` | `2`；WebSearch 隊列最大同時執行數 |
 | `WEBFETCH_MAX_PARALLEL` | `2`；WebFetch 文件工作最大同時執行數 |
-| `WEBFETCH_TIMEOUT_MS` | `20000` |
+| `WEBFETCH_HTML_PROVIDER` | `internal`；可設 `awesome-web-fetch`，只替換 HTML／Browser Page 取得層 |
+| `WEBFETCH_PROBE_TIMEOUT_MS` | `5000`；extensionless URL 的有界 HEAD 分類時間 |
+| `AWESOME_WEB_FETCH_BASE_URL` | Runtime 預設空；Compose 使用 `http://awesome-web-fetch:3000` |
+| `AWESOME_WEB_FETCH_PATH` | `/` |
+| `AWESOME_WEB_FETCH_API_KEY` | 空；Compose sidecar 與 Proxy 必須使用相同強密鑰 |
+| `AWESOME_WEB_FETCH_TIMEOUT_MS` | `90000` |
+| `AWESOME_WEB_FETCH_MAX_RESPONSE_BYTES` | `8388608` |
+| `AWESOME_WEB_FETCH_BUILD_CONTEXT` | `https://github.com/ericli1018/awesome-web-fetch.git#main`；只供 Compose build |
+| `AWESOME_WEB_FETCH_IMAGE` | `awesome-web-fetch:local`；只供 Compose build/tag |
+| `WEBFETCH_TIMEOUT_MS` | `20000`；Internal 文件下載 timeout |
 | `WEBFETCH_MAX_USES` | `3` |
 | `WEBFETCH_MAX_REDIRECTS` | `5` |
 | `WEBFETCH_MAX_DOWNLOAD_BYTES` | `20971520` |

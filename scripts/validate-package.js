@@ -28,6 +28,7 @@ const required = [
   'packages/anthropic/action-intent.js',
   'packages/anthropic/managed-websearch.js',
   'packages/anthropic/managed-web-tools.js',
+  'packages/anthropic/awesome-web-fetch.js',
   'packages/anthropic/hosted-web-tools.js',
   'packages/anthropic/stream-envelope.js',
   'packages/anthropic/claude-code-tools/recovery.js',
@@ -60,6 +61,7 @@ const required = [
   'test/anthropic-tool-input-schema-guard-v079.test.js',
   'test/anthropic-targeted-schema-correction-v0710.test.js',
   'test/anthropic-hosted-web-search-v0712.test.js',
+  'test/anthropic-awesome-web-fetch-v0713.test.js',
   'vllm-proxy-suite.js',
 ];
 
@@ -84,7 +86,7 @@ const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8
 if (packageJson.name !== 'vllm-proxy-suite') errors.push('package.json name must be vllm-proxy-suite');
 if (packageJson.type !== 'module') errors.push('package.json type must be module');
 if (packageJson.engines?.node !== '>=22') errors.push('Node.js engine must be >=22');
-if (packageJson.version !== '0.7.12') errors.push('package.json version must be 0.7.12');
+if (packageJson.version !== '0.7.13') errors.push('package.json version must be 0.7.13');
 
 const compose = readFileSync(resolve(root, 'docker-compose.partial.yaml'), 'utf8');
 if (!compose.includes('https://github.com/ericli1018/vllm-proxy-suite.git')) errors.push('Compose repository URL is incorrect');
@@ -143,17 +145,23 @@ if (!compose.includes('MANAGED_WEB_STREAM_PROGRESS_INTERVAL_MS')) errors.push('C
 if (!compose.includes('WEBFETCH_READER_CHUNK_CHARS')) errors.push('Compose must expose WebFetch reader chunk size');
 if (!compose.includes('WEBFETCH_MAX_DOWNLOAD_BYTES')) errors.push('Compose must expose WebFetch download limit');
 if (!compose.includes('WEBFETCH_PDF_PAGES_PER_CHUNK')) errors.push('Compose must expose PDF page grouping');
+if (!compose.includes('WEBFETCH_HTML_PROVIDER')) errors.push('Compose must expose the content-aware HTML provider');
+if (!compose.includes('AWESOME_WEB_FETCH_BASE_URL')) errors.push('Compose must expose the awesome-web-fetch base URL');
+if (!compose.includes('AWESOME_WEB_FETCH_API_KEY')) errors.push('Compose must expose the awesome-web-fetch API key');
 
 const servicesPart = compose.split(/^services:\s*$/m)[1] || '';
 const serviceNames = [...servicesPart.matchAll(/^  ([a-zA-Z0-9_-]+):$/gm)].map((match) => match[1]);
-if (serviceNames.length !== 2 || serviceNames[0] !== 'vllm-proxy-suite' || serviceNames[1] !== 'searxng') {
-  errors.push(`Compose must define vllm-proxy-suite and opt-in searxng services; found: ${serviceNames.join(', ')}`);
+if (serviceNames.length !== 3 || serviceNames[0] !== 'vllm-proxy-suite' || serviceNames[1] !== 'searxng' || serviceNames[2] !== 'awesome-web-fetch') {
+  errors.push(`Compose must define vllm-proxy-suite, opt-in searxng, and opt-in awesome-web-fetch services; found: ${serviceNames.join(', ')}`);
 }
 if (!compose.includes('docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}')) errors.push('Compose must use the official SearXNG image');
 if (!compose.includes('- websearch')) errors.push('Compose must gate the SearXNG service behind the websearch profile');
 if (!compose.includes('searxng-config:/etc/searxng')) errors.push('Compose must persist SearXNG configuration');
 if (!compose.includes('searxng-data:/var/cache/searxng')) errors.push('Compose must persist SearXNG cache data');
 if (!compose.includes('- json')) errors.push('Compose must initialize SearXNG JSON search format');
+if (!compose.includes('https://github.com/ericli1018/awesome-web-fetch.git#main')) errors.push('Compose must default awesome-web-fetch to the project Git context');
+if (!compose.includes('- webfetch-browser')) errors.push('Compose must gate awesome-web-fetch behind the webfetch-browser profile');
+if (!compose.includes('shm_size: "1gb"')) errors.push('Compose must allocate shared memory for awesome-web-fetch Chromium');
 
 const dockerfile = readFileSync(resolve(root, 'Dockerfile'), 'utf8');
 if (!dockerfile.includes('CMD ["node", "/app/vllm-proxy-suite.js"]')) errors.push('Dockerfile must start the JavaScript Gateway');
@@ -181,6 +189,11 @@ if (!anthropicRuntime.includes('validateAnthropicOutputRequiredRecovery')) error
 if (!anthropicRuntime.includes('validateExposedClaudeCodeToolCalls')) errors.push('Anthropic runtime must validate every exposed Tool input before replay');
 if (!anthropicRuntime.includes('isTargetlessClaudeCodeToolRecoveryIssue')) errors.push('Anthropic runtime must route targetless invalid mutation Tool calls to generic Recovery');
 
+
+const awesomeWebFetch = readFileSync(resolve(root, 'packages/anthropic/awesome-web-fetch.js'), 'utf8');
+if (!awesomeWebFetch.includes('page_content')) errors.push('awesome-web-fetch adapter must consume page_content');
+if (!awesomeWebFetch.includes('content_type')) errors.push('awesome-web-fetch adapter must consume content-type metadata');
+if (!anthropicRuntime.includes('WEBFETCH_HTML_PROVIDER')) errors.push('Anthropic runtime must expose the HTML provider selector');
 
 const hostedWebTools = readFileSync(resolve(root, 'packages/anthropic/hosted-web-tools.js'), 'utf8');
 if (!hostedWebTools.includes('web_search_20250305')) errors.push('Hosted Web Tool adapter must recognize Anthropic web_search_20250305');

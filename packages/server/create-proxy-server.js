@@ -69,6 +69,8 @@ function createMetrics() {
     managedWebFetchFailuresTotal: 0,
     managedWebFetchLimitsTotal: 0,
     managedWebFetchChunksTotal: 0,
+    awesomeWebFetchExecutionsTotal: 0,
+    awesomeWebFetchReroutesTotal: 0,
     managedWebToolItemsCompletedTotal: 0,
     managedWebToolProgressPingsTotal: 0,
     managedStreamProgressDeltasTotal: 0,

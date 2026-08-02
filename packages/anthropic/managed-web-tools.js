@@ -8,11 +8,19 @@ import { promisify } from 'node:util';
 
 import { anthropicMessagesAdapter } from './messages.js';
 import { applyHostedWebSearchDefaults, consumeAnthropicHostedWebSearchPolicy } from './hosted-web-tools.js';
+import { fetchAwesomeWebPage } from './awesome-web-fetch.js';
 
 const execFileAsync = promisify(execFile);
 const TRACKING_PARAMETERS = new Set(['fbclid', 'gclid', 'mc_cid', 'mc_eid', 'ref', 'ref_src']);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-const ALLOWED_DOCUMENT_TYPES = new Set(['text/html', 'text/plain', 'application/pdf']);
+const INTERNAL_DOCUMENT_EXTENSIONS = new Set([
+  '.pdf', '.txt', '.text', '.md', '.markdown', '.json', '.xml', '.csv', '.tsv', '.log', '.yaml', '.yml',
+]);
+const HTML_CONTENT_TYPES = new Set(['text/html', 'application/xhtml+xml']);
+const INTERNAL_STRUCTURED_CONTENT_TYPES = new Set([
+  'application/pdf', 'application/json', 'application/ld+json', 'application/xml', 'application/csv',
+  'text/csv', 'text/tab-separated-values', 'text/markdown', 'application/yaml', 'application/x-yaml',
+]);
 
 function asString(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -21,6 +29,43 @@ function asString(value) {
 function positiveInteger(value, fallback = 1) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizedContentType(value) {
+  const normalized = asString(value).toLowerCase().split(';')[0];
+  if (normalized === 'html') return 'text/html';
+  if (normalized === 'pdf') return 'application/pdf';
+  if (normalized === 'text' || normalized === 'plain') return 'text/plain';
+  return normalized;
+}
+
+function isHtmlContentType(value) {
+  return HTML_CONTENT_TYPES.has(normalizedContentType(value));
+}
+
+function isInternalDocumentContentType(value) {
+  const normalized = normalizedContentType(value);
+  return normalized === 'application/pdf'
+    || (normalized.startsWith('text/') && !HTML_CONTENT_TYPES.has(normalized))
+    || INTERNAL_STRUCTURED_CONTENT_TYPES.has(normalized);
+}
+
+function inferredInternalContentTypeFromUrl(value) {
+  try {
+    const pathname = new URL(value).pathname.toLowerCase();
+    const extension = [...INTERNAL_DOCUMENT_EXTENSIONS].find((candidate) => pathname.endsWith(candidate));
+    if (!extension) return '';
+    if (extension === '.pdf') return 'application/pdf';
+    if (extension === '.json') return 'application/json';
+    if (extension === '.xml') return 'application/xml';
+    if (extension === '.csv') return 'text/csv';
+    if (extension === '.tsv') return 'text/tab-separated-values';
+    if (extension === '.md' || extension === '.markdown') return 'text/markdown';
+    if (extension === '.yaml' || extension === '.yml') return 'application/yaml';
+    return 'text/plain';
+  } catch {
+    return '';
+  }
 }
 
 function normalizedDomains(value) {
@@ -157,6 +202,8 @@ function responseFromRaw(upstream, rawBody, stats = null) {
   if (stats?.fetchFailures > 0) headers.set('x-vllm-proxy-managed-webfetch-failures', String(stats.fetchFailures));
   if (stats?.fetchLimitReached) headers.set('x-vllm-proxy-managed-webfetch-limit-reached', 'true');
   if (stats?.fetchChunks > 0) headers.set('x-vllm-proxy-managed-webfetch-chunks', String(stats.fetchChunks));
+  if (stats?.browserFetchUses > 0) headers.set('x-vllm-proxy-awesome-web-fetch-uses', String(stats.browserFetchUses));
+  if (stats?.browserFetchReroutes > 0) headers.set('x-vllm-proxy-awesome-web-fetch-reroutes', String(stats.browserFetchReroutes));
   return new Response(rawBody, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
@@ -426,6 +473,51 @@ async function assertSafeWebUrl(value, resolveHost) {
   return url;
 }
 
+async function classifyWebFetchRoute(fetchImpl, input, config, parentSignal, resolveHost) {
+  if (config.webFetchHtmlProvider !== 'awesome-web-fetch') {
+    return { provider: 'internal', url: input.url, contentType: '' };
+  }
+
+  const extensionType = inferredInternalContentTypeFromUrl(input.url);
+  if (extensionType) return { provider: 'internal', url: input.url, contentType: extensionType };
+
+  let current = await assertSafeWebUrl(input.url, resolveHost);
+  const maxRedirects = positiveInteger(config.webFetchMaxRedirects, 5);
+  for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
+    let response;
+    try {
+      response = await fetchWithTimeout(fetchImpl, current, {
+        method: 'HEAD',
+        redirect: 'manual',
+        headers: {
+          accept: 'text/html, application/xhtml+xml, text/plain;q=0.9, application/pdf;q=0.8, */*;q=0.1',
+          'user-agent': 'VLLM-PROXY-SUITE-WebFetch-Probe/0.7.13',
+        },
+      }, positiveInteger(config.webFetchProbeTimeoutMs, 5000), parentSignal, 'managed_webfetch_probe_timeout');
+    } catch (error) {
+      if (parentSignal?.aborted) throw error;
+      return { provider: 'awesome-web-fetch', url: current.toString(), contentType: '' };
+    }
+
+    if (REDIRECT_STATUSES.has(response.status)) {
+      if (redirects >= maxRedirects) throw new Error('managed_webfetch_probe_redirect_limit');
+      const location = response.headers.get('location');
+      if (!location) return { provider: 'awesome-web-fetch', url: current.toString(), contentType: '' };
+      current = await assertSafeWebUrl(new URL(location, current).toString(), resolveHost);
+      continue;
+    }
+
+    if (!response.ok) return { provider: 'awesome-web-fetch', url: current.toString(), contentType: '' };
+    const contentType = normalizedContentType(response.headers.get('content-type'));
+    const disposition = asString(response.headers.get('content-disposition')).toLowerCase();
+    if (isInternalDocumentContentType(contentType) || disposition.includes('attachment')) {
+      return { provider: 'internal', url: current.toString(), contentType };
+    }
+    return { provider: 'awesome-web-fetch', url: current.toString(), contentType };
+  }
+  throw new Error('managed_webfetch_probe_redirect_limit');
+}
+
 function webFetchInput(toolInput = {}, config = {}) {
   const url = asString(toolInput.url);
   const prompt = asString(toolInput.prompt);
@@ -457,9 +549,13 @@ async function fetchDocument(fetchImpl, input, config, parentSignal, resolveHost
     }
     if (!response.ok) throw new Error(`managed_webfetch_http_${response.status}`);
     const raw = await readBoundedBuffer(response, positiveInteger(config.webFetchMaxDownloadBytes, 20 * 1024 * 1024), 'managed_webfetch_download');
-    let contentType = asString(response.headers.get('content-type')).toLowerCase().split(';')[0];
+    let contentType = normalizedContentType(response.headers.get('content-type'));
     if (raw.subarray(0, 5).toString('ascii') === '%PDF-') contentType = 'application/pdf';
-    if (!ALLOWED_DOCUMENT_TYPES.has(contentType)) throw new Error(`managed_webfetch_unsupported_content_type:${contentType || 'unknown'}`);
+    const inferredContentType = inferredInternalContentTypeFromUrl(current.toString());
+    if (!contentType || contentType === 'application/octet-stream') contentType = inferredContentType || contentType;
+    if (!isHtmlContentType(contentType) && !isInternalDocumentContentType(contentType)) {
+      throw new Error(`managed_webfetch_unsupported_content_type:${contentType || 'unknown'}`);
+    }
     return { finalUrl: current.toString(), contentType, raw };
   }
   throw new Error('managed_webfetch_redirect_limit');
@@ -696,11 +792,45 @@ function boundedJsonPayload(payload, maxBytes) {
 
 async function executeWebFetch(fetchImpl, vllmUrl, init, requestBody, call, config, parentSignal, dependencies) {
   const input = webFetchInput(call.input || {}, config);
-  const downloaded = await fetchDocument(fetchImpl, input, config, parentSignal, dependencies.resolveHost);
+  const route = await classifyWebFetchRoute(fetchImpl, input, config, parentSignal, dependencies.resolveHost);
+  let provider = 'internal';
+  let browserAttempted = false;
+  let browserRerouted = false;
+  let downloaded;
   let document;
-  if (downloaded.contentType === 'text/html') document = extractHtmlDocument(downloaded.raw.toString('utf8'), downloaded.finalUrl);
-  else if (downloaded.contentType === 'text/plain') document = extractPlainTextDocument(downloaded.raw, downloaded.finalUrl);
-  else document = await extractPdfDocument(downloaded.raw, downloaded.finalUrl, config, dependencies.pdfTextExtractor);
+  if (route.provider === 'awesome-web-fetch') {
+    browserAttempted = true;
+    const rendered = await fetchAwesomeWebPage(fetchImpl, { ...input, url: route.url }, config, parentSignal);
+    const renderedFinalUrl = (await assertSafeWebUrl(rendered.finalUrl || route.url, dependencies.resolveHost)).toString();
+    const renderedContentType = normalizedContentType(rendered.contentType) || 'text/html';
+    if (isHtmlContentType(renderedContentType)) {
+      provider = 'awesome-web-fetch';
+      downloaded = {
+        finalUrl: renderedFinalUrl,
+        contentType: 'text/html',
+        raw: null,
+      };
+      document = {
+        kind: 'html',
+        title: rendered.title || '',
+        url: downloaded.finalUrl,
+        text: normalizeExtractedText(rendered.pageContent),
+        browserRendered: rendered.browserRendered,
+        statusCode: rendered.statusCode,
+      };
+    } else {
+      browserRerouted = true;
+      downloaded = await fetchDocument(fetchImpl, { ...input, url: renderedFinalUrl }, config, parentSignal, dependencies.resolveHost);
+    }
+  } else {
+    downloaded = await fetchDocument(fetchImpl, { ...input, url: route.url }, config, parentSignal, dependencies.resolveHost);
+  }
+
+  if (!document) {
+    if (isHtmlContentType(downloaded.contentType)) document = extractHtmlDocument(downloaded.raw.toString('utf8'), downloaded.finalUrl);
+    else if (downloaded.contentType === 'application/pdf') document = await extractPdfDocument(downloaded.raw, downloaded.finalUrl, config, dependencies.pdfTextExtractor);
+    else document = extractPlainTextDocument(downloaded.raw, downloaded.finalUrl);
+  }
   document = truncateDocument(document, config);
   const chunks = chunkExtractedDocument(document, config);
   if (chunks.length === 0) throw new Error('managed_webfetch_empty_document');
@@ -720,6 +850,7 @@ async function executeWebFetch(fetchImpl, vllmUrl, init, requestBody, call, conf
     url: document.url,
     title: document.title || null,
     content_type: downloaded.contentType,
+    provider,
     chunks_total: chunks.length,
     evidence,
   }).slice(0, positiveInteger(config.webFetchSynthesisInputMaxChars, 200000));
@@ -736,6 +867,7 @@ async function executeWebFetch(fetchImpl, vllmUrl, init, requestBody, call, conf
     url: document.url,
     title: document.title || null,
     content_type: downloaded.contentType,
+    provider,
     research_prompt: input.prompt,
     chunks_total: chunks.length,
     chunks_relevant: evidence.length,
@@ -749,7 +881,13 @@ async function executeWebFetch(fetchImpl, vllmUrl, init, requestBody, call, conf
     ],
     truncated: false,
   };
-  return { text: boundedJsonPayload(payload, positiveInteger(config.webFetchResultMaxBytes, 64 * 1024)), chunks: chunks.length };
+  return {
+    text: boundedJsonPayload(payload, positiveInteger(config.webFetchResultMaxBytes, 64 * 1024)),
+    chunks: chunks.length,
+    provider,
+    browserAttempted,
+    browserRerouted,
+  };
 }
 
 export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch, config = {}, options = {}) {
@@ -784,6 +922,7 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
     const stats = {
       searchUses: 0, searchFailures: 0, searchLimitReached: false,
       fetchUses: 0, fetchFailures: 0, fetchLimitReached: false, fetchChunks: 0,
+      browserFetchUses: 0, browserFetchReroutes: 0,
     };
     const disabledManagedKinds = new Set();
 
@@ -906,6 +1045,8 @@ export function createAnthropicManagedWebToolsFetch(fetchImpl = globalThis.fetch
           try {
             const fetched = await executeWebFetch(fetchImpl, url, upstreamInit, requestBody, call, config, upstreamInit.signal, dependencies);
             stats.fetchChunks += fetched.chunks;
+            if (fetched.browserAttempted) stats.browserFetchUses += 1;
+            if (fetched.browserRerouted) stats.browserFetchReroutes += 1;
             return { call, content: fetched.text, isError: false, chunks: fetched.chunks };
           } catch (error) {
             if (upstreamInit.signal?.aborted) throw error;

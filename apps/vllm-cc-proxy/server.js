@@ -87,6 +87,13 @@ export function loadAnthropicConfig(env = process.env) {
     searxngLanguage: env.SEARXNG_LANGUAGE || 'all',
     searxngCategories: parseCsv(env.SEARXNG_CATEGORIES || 'general'),
     searxngSafeSearch: boundedInteger(env.SEARXNG_SAFE_SEARCH, 0, 0, 2),
+    webFetchHtmlProvider: enumValue(env.WEBFETCH_HTML_PROVIDER, ['internal', 'awesome-web-fetch'], 'internal'),
+    webFetchProbeTimeoutMs: positiveInteger(env.WEBFETCH_PROBE_TIMEOUT_MS, 5000),
+    awesomeWebFetchBaseUrl: trimTrailingSlash(env.AWESOME_WEB_FETCH_BASE_URL || ''),
+    awesomeWebFetchPath: env.AWESOME_WEB_FETCH_PATH || '/',
+    awesomeWebFetchApiKey: env.AWESOME_WEB_FETCH_API_KEY || '',
+    awesomeWebFetchTimeoutMs: positiveInteger(env.AWESOME_WEB_FETCH_TIMEOUT_MS, 90000),
+    awesomeWebFetchMaxResponseBytes: positiveInteger(env.AWESOME_WEB_FETCH_MAX_RESPONSE_BYTES, 8388608),
     webFetchTimeoutMs: positiveInteger(env.WEBFETCH_TIMEOUT_MS, 20000),
     webFetchMaxUses: positiveInteger(env.WEBFETCH_MAX_USES, 3),
     webFetchMaxRedirects: boundedInteger(env.WEBFETCH_MAX_REDIRECTS, 5, 0, 20),
@@ -368,6 +375,8 @@ export function createAnthropicGuardedRoute(config, options = {}) {
       const fetchFailures = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-failures') || '0', 10) || 0;
       const fetchLimitReached = attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-limit-reached') === 'true';
       const fetchChunks = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-managed-webfetch-chunks') || '0', 10) || 0;
+      const browserFetchUses = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-awesome-web-fetch-uses') || '0', 10) || 0;
+      const browserFetchReroutes = Number.parseInt(attempt?.headers?.get?.('x-vllm-proxy-awesome-web-fetch-reroutes') || '0', 10) || 0;
       if (uses > 0 || failures > 0 || limitReached) {
         metrics.managedWebSearchExecutionsTotal += uses;
         metrics.managedWebSearchFailuresTotal += failures;
@@ -378,6 +387,8 @@ export function createAnthropicGuardedRoute(config, options = {}) {
         metrics.managedWebFetchExecutionsTotal += fetchUses;
         metrics.managedWebFetchFailuresTotal += fetchFailures;
         metrics.managedWebFetchChunksTotal += fetchChunks;
+        metrics.awesomeWebFetchExecutionsTotal += browserFetchUses;
+        metrics.awesomeWebFetchReroutesTotal += browserFetchReroutes;
         if (fetchLimitReached) metrics.managedWebFetchLimitsTotal += 1;
         logger.info('managed_webfetch_completed', {
           attempt: attemptNumber,
@@ -385,6 +396,8 @@ export function createAnthropicGuardedRoute(config, options = {}) {
           uses: fetchUses,
           failures: fetchFailures,
           chunks: fetchChunks,
+          browserUses: browserFetchUses,
+          browserReroutes: browserFetchReroutes,
           limitReached: fetchLimitReached,
         });
       }

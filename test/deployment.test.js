@@ -10,7 +10,7 @@ test('JavaScript gateway is the only published listener and Nginx is absent', as
   const services = compose.split(/^services:\s*$/m)[1] || '';
   assert.deepEqual(
     (services.match(/^  [a-zA-Z0-9_-]+:/gm) || []).map((line) => line.trim().slice(0, -1)),
-    ['vllm-proxy-suite', 'searxng'],
+    ['vllm-proxy-suite', 'searxng', 'awesome-web-fetch'],
   );
   assert.equal((compose.match(/ports:/g) || []).length, 1);
   assert.match(compose, /- "3456:3456"/);
@@ -87,4 +87,19 @@ test('Compose provides an opt-in SearXNG backend for the managed WebSearch bridg
   const searxngService = compose.split(/^  searxng:$/m)[1] || '';
   assert.doesNotMatch(searxngService, /^    ports:/m);
   assert.match(searxngService, /^    networks:\s*\n\s*- vllm-test-network/m);
+});
+
+
+test('Compose provides an opt-in awesome-web-fetch browser sidecar for HTML pages', async () => {
+  const compose = await read('docker-compose.partial.yaml');
+  assert.match(compose, /^  awesome-web-fetch:$/m);
+  assert.match(compose, /https:\/\/github\.com\/ericli1018\/awesome-web-fetch\.git#main/);
+  assert.match(compose, /profiles:\s*\n\s*- webfetch-browser/);
+  assert.match(compose, /shm_size: "1gb"/);
+  assert.match(compose, /AWESOME_WEB_FETCH_BASE_URL: "\$\{AWESOME_WEB_FETCH_BASE_URL:-http:\/\/awesome-web-fetch:3000\}"/);
+  assert.match(compose, /WEBFETCH_HTML_PROVIDER: "\$\{WEBFETCH_HTML_PROVIDER:-internal\}"/);
+  assert.match(compose, /API_KEY: "\$\{AWESOME_WEB_FETCH_API_KEY:-replace-with-a-long-random-sidecar-key\}"/);
+  const sidecar = compose.split(/^  awesome-web-fetch:$/m)[1] || '';
+  assert.doesNotMatch(sidecar, /^    ports:/m);
+  assert.match(sidecar, /^    networks:\s*\n\s*- vllm-test-network/m);
 });

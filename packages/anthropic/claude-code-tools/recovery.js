@@ -369,6 +369,23 @@ function enabledForTool(name, config) {
   return false;
 }
 
+function classifyMutationFailure(resultText) {
+  const normalized = String(resultText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (
+    normalized.includes('file has not been read yet')
+    && (
+      normalized.includes('read it first before writing')
+      || normalized.includes('read it before writing')
+      || normalized.includes('read it before overwriting')
+    )
+  ) return 'read_precondition';
+  return 'deterministic_mutation_failure';
+}
+
+function repeatedFailureMessage(name) {
+  return `The model repeated a ${name || 'tool'} call that previously failed.`;
+}
+
 function collectHistory(request, config) {
   const toolUses = new Map();
   const failedFingerprints = new Map();
@@ -403,7 +420,13 @@ function collectHistory(request, config) {
       const resultText = contentToText(block.content);
 
       if (failed) {
-        failedFingerprints.set(call.fingerprint, { ...call, resultText });
+        failedFingerprints.set(call.fingerprint, {
+          ...call,
+          resultText,
+          failureKind: isMutationTool(call.name)
+            ? classifyMutationFailure(resultText)
+            : 'tool_failure',
+        });
         if (call.name === TOOL_NAMES.BASH && config?.claudeCodeBashInvalidatesReads !== false) {
           freshReads.clear();
         } else if (isMutationTool(call.name)) {
@@ -442,6 +465,7 @@ function buildIssueContext({ request, call, history, failed = null }) {
     rejectedArguments: structuredClone(call.parsedArguments || {}),
     rejectedFingerprint: fingerprint(call.name, call.parsedArguments || {}),
     failedResultText: failed?.resultText || '',
+    failedResultKind: failed?.failureKind || null,
     hasFreshRead: Boolean(targetPath && history.freshReads.has(targetPath)),
     readToolAvailable: Boolean(toolByName(request, TOOL_NAMES.READ)),
   };
@@ -472,7 +496,15 @@ export function analyzeClaudeCodeToolAttempt({ request, output, config }) {
     const failed = history.failedFingerprints.get(context.rejectedFingerprint);
     if (failed) {
       const failedContext = buildIssueContext({ request, call, history, failed });
-      return invalid(repeatedReason(call.name), failed.resultText || repeatedReason(call.name), failedContext);
+      const resolvedReadPrecondition = failed.failureKind === 'read_precondition'
+        && failedContext.hasFreshRead;
+      if (!resolvedReadPrecondition) {
+        return invalid(
+          repeatedReason(call.name),
+          repeatedFailureMessage(call.name),
+          failedContext,
+        );
+      }
     }
   }
   return { ok: true };
@@ -684,39 +716,49 @@ function recoveryCall(output) {
   return { ok: true, call: calls[0] };
 }
 
+function terminalRecoveryFailure(reason, detail = reason, diagnostics = undefined) {
+  return {
+    ok: false,
+    reason,
+    detail,
+    retryable: false,
+    ...(diagnostics ? { diagnostics } : {}),
+  };
+}
+
 export function validateClaudeCodeToolRecovery(output, plan) {
   const selected = recoveryCall(output);
-  if (!selected.ok) return selected;
+  if (!selected.ok) return terminalRecoveryFailure(selected.reason);
   const call = selected.call;
-  if (call.name !== plan.toolName) return invalid('forced_tool_name_mismatch');
-  if (!isPlainObject(call.parsedArguments)) return invalid('invalid_claude_code_tool_input');
+  if (call.name !== plan.toolName) return terminalRecoveryFailure('forced_tool_name_mismatch');
+  if (!isPlainObject(call.parsedArguments)) return terminalRecoveryFailure('invalid_claude_code_tool_input');
   if (plan.inputSchema) {
     const schemaValidation = validateAgainstToolSchema(
       { name: plan.toolName, input_schema: plan.inputSchema },
       call.parsedArguments,
     );
-    if (!schemaValidation.ok) return schemaValidation;
+    if (!schemaValidation.ok) return terminalRecoveryFailure(schemaValidation.reason, schemaValidation.detail, schemaValidation.diagnostics);
   }
   const actualTarget = targetPathFor(call.name, call.parsedArguments);
-  if (actualTarget !== plan.targetPath) return invalid('recovery_target_mismatch');
+  if (actualTarget !== plan.targetPath) return terminalRecoveryFailure('recovery_target_mismatch');
 
   if (plan.mode === 'read_target') return { ok: true };
 
   if (call.name === TOOL_NAMES.EDIT) {
     if (typeof call.parsedArguments.old_string !== 'string' || typeof call.parsedArguments.new_string !== 'string') {
-      return invalid('invalid_claude_code_tool_input');
+      return terminalRecoveryFailure('invalid_claude_code_tool_input');
     }
     if (call.parsedArguments.old_string === call.parsedArguments.new_string) {
-      return invalid('no_op_edit_tool_call');
+      return terminalRecoveryFailure('no_op_edit_tool_call');
     }
     if (plan.rejectedArguments?.replace_all !== true && call.parsedArguments.replace_all === true) {
-      return invalid('recovery_scope_widened');
+      return terminalRecoveryFailure('recovery_scope_widened');
     }
   }
 
   const currentFingerprint = fingerprint(call.name, call.parsedArguments);
   if (plan.rejectedFingerprint && currentFingerprint === plan.rejectedFingerprint) {
-    return invalid(repeatedReason(call.name));
+    return terminalRecoveryFailure(repeatedReason(call.name), repeatedFailureMessage(call.name));
   }
   return { ok: true };
 }

@@ -177,7 +177,7 @@ test('invalid Tool input is rejected by the universal schema guard before stop-r
     },
   });
 
-  assert.equal(result.response.status, 502);
+  assert.equal(result.response.status, 422);
   assert.match(result.text, /invalid_tool_input_schema/);
   assert.ok(!result.logs.some((row) => row.event === 'tool_stop_reason_normalized'));
 });

@@ -165,19 +165,20 @@ export function createAnthropicGuardedRoute(config, options = {}) {
         config,
       });
       if (!toolValidation.ok) {
-        if (isTargetlessClaudeCodeToolRecoveryIssue(toolValidation)) {
-          return {
-            ...toolValidation,
-            retryable: !recovery,
-            diagnostics: {
-              ...(toolValidation.diagnostics || {}),
+        const targetless = isTargetlessClaudeCodeToolRecoveryIssue(toolValidation);
+        return {
+          ...toolValidation,
+          retryable: !recovery,
+          diagnostics: {
+            ...(toolValidation.diagnostics || {}),
+            claudeCodeToolRecoveryAttempted: Boolean(recovery),
+            ...(targetless ? {
               targetlessToolRecovery: true,
               targetlessToolRecoveryAttempted: Boolean(recovery),
               rejectedToolName: toolValidation.context?.toolName || null,
-            },
-          };
-        }
-        return toolValidation;
+            } : {}),
+          },
+        };
       }
       if (config.claudeCodeToolInputSchemaGuardEnabled) {
         const exposedToolValidation = validateExposedClaudeCodeToolCalls({ request: originalBody, output });

@@ -244,7 +244,7 @@ test('Claude Code runtime fuses repeated No response Recovery as non-retryable',
   const text = await response.text();
 
   assert.equal(attempts, 2);
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 422);
   assert.match(text, /placeholder_completion_without_progress/);
   assert.match(text, /"retryable":false/);
   assert.ok(logs.some((row) => row.event === 'placeholder_completion_without_progress_fused'));
@@ -281,7 +281,7 @@ test('Claude Code runtime fuses thinking-only placeholder Recovery under the ori
   const text = await response.text();
 
   assert.equal(attempts, 2);
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 422);
   assert.match(text, /placeholder_completion_without_progress/);
   assert.match(text, /"retryable":false/);
   assert.ok(logs.some((row) => row.event === 'placeholder_completion_without_progress_fused'

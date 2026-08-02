@@ -573,6 +573,8 @@ status=422
 retryable=false
 ```
 
+`client_retry_suppressed` is emitted for every terminal semantic `invalid` result explicitly marked `retryable:false`, not only Action-Intent or Managed Web fuses. File-tool examples include `repeated_failed_write_tool_call`, `recovery_target_mismatch`, and `no_op_edit_tool_call`. Transport failures and recoverable initial semantic failures remain outside this mapping. Public error messages use stable Proxy text; raw `<tool_use_error>` Tool Result markup is retained only in bounded internal diagnostics.
+
 For any initial Thinking-only terminal response, Output-Required Recovery logs include:
 
 ```text

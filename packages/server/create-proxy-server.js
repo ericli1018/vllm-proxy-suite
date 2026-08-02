@@ -1078,8 +1078,7 @@ export function createProtocolProxyRuntime({
       }, 'error');
       const failureReason = attempt.reason || attempt.loopInfo?.reason || 'unknown';
       const clientRetrySuppressed = attempt.kind === 'invalid'
-        && attempt.retryable === false
-        && ['action_intent_without_tool_call', 'managed_web_tool_limit_repeated', 'managed_web_mixed_batch_repeated', 'managed_hosted_tool_escape'].includes(failureReason);
+        && attempt.retryable === false;
       const status = attempt.kind === 'http_error' && attempt.status < 500
         ? attempt.status
         : (clientRetrySuppressed ? 422 : 502);

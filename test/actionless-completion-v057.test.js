@@ -282,7 +282,7 @@ test('Responses actionless recovery is fused after one required-tool attempt', a
   const text = await response.text();
 
   assert.equal(attempts, 2);
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 422);
   assert.match(text, /actionless_completion/);
   assert.match(text, /"retryable":false/);
   assert.equal(runtime.metrics.actionlessCompletionsDetectedTotal, 2);

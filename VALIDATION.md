@@ -1,69 +1,71 @@
-# VLLM-PROXY-SUITE v0.7.14 Validation
+# VLLM-PROXY-SUITE v0.7.15 Validation
 
 Validation date: 2026-08-02
 
 ## Scope
 
-v0.7.14 hardens Managed Web Tool dispatch and post-limit behavior without changing the `awesome-web-fetch` provider contract:
+v0.7.15 fixes Claude Code file-mutation prerequisite state and terminal semantic error mapping without changing Managed WebSearch, WebFetch, or `awesome-web-fetch` behavior:
 
-- complete Managed `web_search` or `WebFetch` Tool Calls are classified before delivery even when vLLM incorrectly reports `stop_reason="end_turn"`;
-- a mixed parallel batch containing Managed Web Tools and client-executed Tools is serialized once: Managed Web work executes first and deferred client Tool Calls are not executed or replayed;
-- a second mixed batch is fused as `managed_web_mixed_batch_repeated`, `retryable:false`;
-- Hosted `web_search` responses that cannot be parsed or safely consumed are fused as `managed_hosted_tool_escape` and never escape to Claude Code;
-- after a Search or Fetch kind reaches its request-local use limit, the first repeated call receives one bounded finalization continuation with an explicit error Tool Result;
-- a second post-finalization call remains fused as `managed_web_tool_limit_repeated`, `retryable:false`, with no additional model request;
-- `awesome-web-fetch` Browser execution and Browser-to-Internal reroute counters remain separate from `WEBFETCH_MAX_USES`; each WebFetch Tool Call consumes exactly one attempt from the bounded use budget;
-- HTML routing, PDF/text Internal routing, Reader/Synthesizer behavior, SSRF checks, and the Compose sidecar profile remain unchanged from v0.7.13.
+- `File has not been read yet` is classified as a resolvable `read_precondition`;
+- a successful `Read` of the same path after that failure permits the exact original `Write`;
+- Reads do not clear permission, schema, stale replacement, notebook, or other deterministic failures;
+- stale Reads from before the failed mutation remain invalid;
+- repeated mutation errors use stable Proxy messages instead of returning raw `<tool_use_error>` markup;
+- every terminal Anthropic `invalid` result with `retryable:false` maps to HTTP `422` and emits `client_retry_suppressed`;
+- Recovery remains bounded to one initial Attempt plus at most one Recovery Attempt.
 
 ## Source verification
 
-- Full test suite: 310 passed, 0 failed.
-- Focused v0.7.14 Managed Web regressions: 7 passed, 0 failed.
+- Full test suite: 314 passed, 0 failed.
+- Focused file-tool regressions: 24 passed, 0 failed.
 - `npm run check`: passed.
-- Package validator: `valid:true`, version `0.7.14`, 92 files, 59 required files.
+- Package validator: `valid:true`, version `0.7.15`, 92 files, 59 required files.
 - JavaScript syntax validation: 76 files passed.
 - `docker-compose.partial.yaml`: parsed successfully with services `vllm-proxy-suite`, `searxng`, and `awesome-web-fetch`.
-- Sidecar profile: `webfetch-browser`.
 
 ## No-loop verification
 
 Automated regressions verify:
 
 ```text
-end_turn + complete managed Tool Call
-→ classify as tool_use before Managed dispatch
+failed Write: read_precondition
+→ successful Read of exact path
+→ exact Write delivered once
+→ no Proxy Recovery
 
-Managed Web + client Tool mixed batch
-→ serialize once
-→ second mixed batch returns HTTP/SSE 422
-→ no third continuation
+persistent deterministic Write failure
+→ one bounded Recovery
+→ repeated invalid mutation returns HTTP/SSE 422
+→ retryable:false
+→ no third upstream request
 
-use limit reached
-→ one finalization continuation without external fetch/search
-→ second repeated disabled Tool Call returns HTTP/SSE 422
-→ no further vLLM request
-
-malformed Hosted web_search
-→ managed_hosted_tool_escape
-→ no client-visible hosted Tool Call
+terminal semantic invalid
+→ client_retry_suppressed
+→ no HTTP 502 client retry cascade
 ```
-
-The bounded finalization is not the general Recovery subsystem. It is request-local Managed Web continuation state and is hard-limited to one finalization per disabled kind.
 
 ## Artifact verification
 
-The release procedure additionally verifies:
+- ZIP integrity: passed.
+- Clean extracted ZIP: 314 passed, 0 failed with the package `npm test` command; `npm run check` passed.
+- v0.7.14 -> v0.7.15 patch apply: passed.
+- Patch-applied copy: 314 passed, 0 failed with the package `npm test` command; `npm run check` passed.
+- Source, extracted ZIP, and patch-applied SHA-256 manifests: identical across 92 files.
+- The package test script uses `--test-concurrency=1` to prevent nondeterministic listener collisions among full-runtime integration tests.
+
+The verified commands include:
 
 ```text
-unzip -t VLLM-PROXY-SUITE-v0.7.14.zip
+unzip -t VLLM-PROXY-SUITE-v0.7.15.zip
 npm test from a clean extracted ZIP
 npm run check from a clean extracted ZIP
+git apply --check vllm-proxy-suite-v0715.patch
 source and extracted ZIP SHA-256 manifests are identical
-v0.7.13 -> v0.7.14 patch applies cleanly and produces the same manifest
+v0.7.14 -> v0.7.15 patch produces the same manifest
 ```
 
 ## Not executed
 
-- A live Docker/Compose image build of the external `awesome-web-fetch` Git context.
-- A real Claude Code -> Proxy -> vLLM -> SearXNG/awesome-web-fetch deployment integration.
-- Production load, long-duration browser-context, or egress-policy testing.
+- A live Docker/Compose image build.
+- A real Claude Code -> Proxy -> vLLM deployment integration.
+- Production load or long-duration testing.

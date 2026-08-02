@@ -492,7 +492,7 @@ test('Claude Code thinking-only Recovery fuses a second empty output without for
   const text = await response.text();
 
   assert.equal(attempts, 2);
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 422);
   assert.deepEqual(received[1].tools, tools);
   assert.deepEqual(received[1].tool_choice, { type: 'auto' });
   assert.match(text, /thinking_without_output/);

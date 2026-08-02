@@ -243,7 +243,7 @@ test('runtime fuses repeated schema-invalid Tool input as non-retryable', async 
   const text = await response.text();
 
   assert.equal(attempts, 2);
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 422);
   assert.match(text, /invalid_tool_input_schema/);
   assert.match(text, /"retryable":false/);
   assert.ok(logs.some((row) => row.event === 'tool_input_schema_recovery_fused'));

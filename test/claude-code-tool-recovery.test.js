@@ -205,6 +205,42 @@ test('repeated failed Write with unread-file error uses Read-first recovery', ()
   assert.deepEqual(recovery.body.tools.map((tool) => tool.name), ['Read']);
 });
 
+
+test('successful Read after an unread-file Write failure resolves the exact Write fingerprint', () => {
+  const input = { file_path: '/work/config.json', content: '{\n  \"ok\": true\n}' };
+  const request = baseRequest([
+    assistantTool('w0', 'Write', input),
+    toolResult('w0', '<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>', true),
+    assistantTool('r0', 'Read', { file_path: '/work/config.json' }),
+    toolResult('r0', '1\t{}', false),
+  ]);
+  const result = analyzeClaudeCodeToolAttempt({
+    request,
+    output: output([{ id: 'w1', name: 'Write', parsedArguments: structuredClone(input) }]),
+    config,
+  });
+  assert.deepEqual(result, { ok: true });
+});
+
+test('successful Read does not resolve a deterministic failed Write', () => {
+  const input = { file_path: '/work/config.json', content: '{}' };
+  const request = baseRequest([
+    assistantTool('w0', 'Write', input),
+    toolResult('w0', '<tool_use_error>Permission denied</tool_use_error>', true),
+    assistantTool('r0', 'Read', { file_path: '/work/config.json' }),
+    toolResult('r0', '1\t{}', false),
+  ]);
+  const result = analyzeClaudeCodeToolAttempt({
+    request,
+    output: output([{ id: 'w1', name: 'Write', parsedArguments: structuredClone(input) }]),
+    config,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'repeated_failed_write_tool_call');
+  assert.equal(result.detail, 'The model repeated a Write call that previously failed.');
+  assert.match(result.context.failedResultText, /Permission denied/);
+});
+
 test('NotebookEdit uses its request schema and exact notebook target', () => {
   const input = { notebook_path: '/work/a.ipynb', new_source: 'print(1)', edit_mode: 'replace', cell_id: 'cell-1' };
   const request = baseRequest([

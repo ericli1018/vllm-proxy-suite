@@ -204,7 +204,7 @@ test('runtime fuses repeated targetless invalid Tool input as non-retryable', as
   const text = await response.text();
 
   assert.equal(attempts, 2);
-  assert.equal(response.status, 502);
+  assert.equal(response.status, 422);
   assert.match(text, /invalid_claude_code_tool_input/);
   assert.match(text, /"retryable":false/);
   assert.ok(logs.some((row) => row.event === 'targetless_tool_recovery_fused'));

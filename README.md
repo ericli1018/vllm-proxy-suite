@@ -757,13 +757,22 @@ Edit old_string == new_string
 
 同一 mutation tool + canonical arguments
 且歷史 tool_result is_error:true
-→ 阻擋完全相同的失敗重送
+→ 依失敗類型判斷是否仍應阻擋
+
+File has not been read yet
+→ 視為可解除的 read_precondition
+→ 同一路徑在該失敗之後成功 Read
+→ 允許原本相同的 Write 一次
+
+Permission denied／old_string not found／schema 或其他確定性失敗
+→ 成功 Read 不會清除失敗 fingerprint
+→ 相同 mutation 仍進入有界 Recovery／熔斷
 
 Tool arguments 不符合本次 tools[].input_schema
 → 阻擋結構不合法的 mutation
 ```
 
-Recovery 必須只有一個允許的 Tool Call、不能帶 Final Text、不能改變 target。沒有足夠證據證明修復安全時，Proxy fail closed。
+Recovery 必須只有一個允許的 Tool Call、不能帶 Final Text、不能改變 target。沒有足夠證據證明修復安全時，Proxy fail closed。任何最終 `invalid + retryable:false` 語意熔斷都使用 HTTP `422` 並記錄 `client_retry_suppressed`，不再以 `502` 誘發 Claude Code 的 `attempt 1/10`；API Error 也不會直接回放 `<tool_use_error>` 原文。
 
 Recovery Prompt 使用狀態重置與策略切換，而不是空泛鼓勵：前次 generation 已丟棄、Recovery 是正常流程、不得解釋前次失敗，只執行下一個有效動作。
 

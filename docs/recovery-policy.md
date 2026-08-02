@@ -126,9 +126,11 @@ The initial and Recovery outputs are checked before raw replay for:
 - Required fields, primitive types, enums, and constants for `Read`, `Edit`, `Write`, and `NotebookEdit`.
 - Precisely identifiable Tool targets.
 
-Read freshness is derived from accepted history. A failed mutation invalidates prior Read evidence for the target; a Bash Tool Result clears Read freshness according to configuration.
+Read freshness is derived from accepted history. A failed mutation invalidates prior Read evidence for the target; a Bash Tool Result clears Read freshness according to configuration. Mutation failures are classified before canonical replay protection is applied.
 
-Without fresh target evidence, Recovery permits only the exact `Read`. With fresh evidence, it permits only the original mutation tool, locks the target, and rejects no-op, `replace_all` expansion, and exact failed-argument replay.
+`File has not been read yet` is a resolvable `read_precondition`. A successful `Read` of the exact target after that failure satisfies the prerequisite and permits the original canonical `Write` without another Proxy Recovery. A Read from before the failure remains stale. Permission, schema, stale replacement, notebook, and other deterministic mutation failures are not cleared by Read.
+
+Without fresh target evidence, Recovery permits only the exact `Read`. With fresh evidence for a persistent deterministic failure, it permits only the original mutation tool, locks the target, and rejects no-op, `replace_all` expansion, and exact failed-argument replay. Terminal Recovery validation returns `retryable:false`; the common server maps every such semantic invalid result to HTTP `422`, emits `client_retry_suppressed`, and never exposes raw `<tool_use_error>` markup as the public error message.
 
 ### Targetless invalid mutation input
 

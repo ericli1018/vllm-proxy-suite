@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.15 - 2026-08-02
+
+- Classified Claude Code mutation Tool failures into resolvable `read_precondition` failures and persistent deterministic failures.
+- A successful `Read` of the same target after `File has not been read yet` now resolves that specific prerequisite, allowing the original canonical `Write` once without entering another Proxy Recovery.
+- Reads do not clear permission, schema, stale replacement, notebook, or other deterministic mutation failures; stale Reads from before the failure remain invalidated.
+- Replaced raw `<tool_use_error>` text in repeated-mutation API errors with stable Proxy messages while retaining the original Tool Result only in internal diagnostics.
+- Made every terminal Anthropic semantic failure with `retryable:false` return HTTP `422` and emit `client_retry_suppressed`, rather than relying on a small reason allowlist that left file-tool failures as retryable HTTP `502`.
+- Added unit and full-runtime regressions for resolved Write prerequisites, persistent deterministic failures, sanitized errors, bounded Recovery, and client-retry suppression.
+- Serialized the package test runner to eliminate nondeterministic fixed-port contention between full-runtime integration tests; Runtime behavior is unchanged.
+
 ## 0.7.14 - 2026-08-02
 
 - Moved Managed Web Tool stop-reason normalization ahead of Managed Tool classification, so a complete `web_search` or `WebFetch` Tool Call that incorrectly ends with `end_turn` is still consumed internally instead of being replayed to Claude Code.
